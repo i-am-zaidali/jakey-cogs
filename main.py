@@ -1,7 +1,10 @@
 import discord
 from redbot.core import commands, Config
 from redbot.core.bot import Red
+from typing import Literal
 from .models import ServerMember, Infraction
+from datetime import datetime, timedelta, timezone
+from .views import YesOrNoView
 
 MEMBER_DEFAULTS = {
     "infractions": []
@@ -53,10 +56,16 @@ class ModPlus(commands.Cog):
         
     async def _warn_infraction_count(self, guild_id: int, user_id: int):
         ...
+        
+    # <--- Commands --->
+    
+    # <--- Setting Commands --->
     
     @commands.group(name="modplusset", aliases=["mpset"], )
     async def mpset(self, ctx: commands.Context):
         return await ctx.send_help()
+    
+    # <--- Reason Shorthands --->
     
     @mpset.group(name="reasonshorthands", aliases=["reasonsh", "rsh"])
     async def mpset_rsh(self, ctx: commands.Context):
@@ -95,3 +104,87 @@ class ModPlus(commands.Cog):
             
             return await ctx.send("Removed shorthand: `{}`".format(shorthand))
         
+    @mpset_rsh.command(name="list")
+    async def mpset_rsh_list(self, ctx: commands.Context):
+        """
+        List all reason shorthands.
+        """
+        reason_sh = await self.config.guild(ctx.guild).reason_sh()
+        
+        if not reason_sh:
+            return await ctx.send("There are no reason shorthands.")
+        
+        embed = discord.Embed(
+            title=f"Reason Shorthands for {ctx.guild.name}",
+            description="\n".join([f"`{shorthand}` - `{reason}`" for shorthand, reason in reason_sh.items()]),
+            color=await ctx.bot.get_embed_color(ctx.channel),
+        )
+        
+        await ctx.send(embed=embed)
+        
+    # <--- Automod --->
+        
+    @mpset.group(name="automod")
+    async def mpset_automod(self, ctx: commands.Context, infraction_count: int, *, action: Literal["ban", "kick", "mute", "warn", "tempban", "clear"]):
+        """
+        Infraction based automod.
+        
+        If a user has more than `infraction_count` infractions, they will be actioned.
+        
+        Use `clear` for the `action` argument to remove the automod for that infraction count.
+        """
+        
+        async with self.config.guild(ctx.guild).automod() as automod:
+            if action == "clear":
+                if infraction_count not in automod:
+                    return await ctx.send("There is no automod for that infraction count.")
+                
+                del automod[infraction_count]
+                return await ctx.send("Removed automod for infraction count: `{}`".format(infraction_count))
+            
+            if a:=automod.get(infraction_count):
+                view = YesOrNoView(ctx, "", "Alright, it will remain the same.")
+                if isinstance(a, int):
+                    await ctx.send(f"That infraction count is already set to `tempban` the user for {a}. Do you want to change it to `{action}`?", view=view)
+                else:
+                    await ctx.send(f"That infraction count is already set to `{a}` the user. Do you want to change it to `{action}`?", view=view)
+            
+                await view.wait()
+                
+                if not view.value:
+                    return
+                
+            if action == "tempban":
+                await ctx.send("How long do you want to tempban the user for? (days, weeks, hours)")
+                msg = await ctx.bot.wait_for("message", check=lambda m: m.author == ctx.author and m.channel == ctx.channel, timeout=60)
+                try:
+                    time: timedelta = await commands.get_timedelta_converter(allowed_units=["hours", "days", "weeks"]).convert(ctx, msg.content)
+                except TimeoutError:
+                    return await ctx.send("Timed Out.")
+                except ValueError:
+                    return await ctx.send("That is not a valid number.")
+                else:
+                    automod[infraction_count] = int(time.total_seconds())
+                
+            else:
+                automod[infraction_count] = action
+                
+            await ctx.send(f"Alright, I will {action} users with more than {infraction_count} infractions.")
+            
+    @mpset_automod.command(name="show")
+    async def mpset_automod_show(self, ctx: commands.Context):
+        """
+        Show the automod settings for the guild.
+        """
+        automod = await self.config.guild(ctx.guild).automod()
+        
+        if not automod:
+            return await ctx.send("There are no automod settings.")
+        
+        embed = discord.Embed(
+            title=f"Automod Settings for {ctx.guild.name}",
+            description="\n".join([f"`{infraction_count}` - `{action}`" for infraction_count, action in automod.items()]),
+            color=await ctx.bot.get_embed_color(ctx.channel),
+        )
+        
+        await ctx.send(embed=embed)
