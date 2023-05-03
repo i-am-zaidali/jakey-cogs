@@ -54,3 +54,44 @@ class ModPlus(commands.Cog):
     async def _warn_infraction_count(self, guild_id: int, user_id: int):
         ...
     
+    @commands.group(name="modplusset", aliases=["mpset"], )
+    async def mpset(self, ctx: commands.Context):
+        return await ctx.send_help()
+    
+    @mpset.group(name="reasonshorthands", aliases=["reasonsh", "rsh"])
+    async def mpset_rsh(self, ctx: commands.Context):
+        """
+        Reason shorthands are shortforms that you can use in reason arguments for moderation commands.
+        
+        These will be replaces by longer strings when the reason is logged.
+        """
+        return await ctx.send_help()
+    
+    @mpset_rsh.command(name="add")
+    async def mpset_rsh_add(self, ctx: commands.Context, shorthand: str, *, reason: str):
+        """
+        Add a new reason shorthand.
+        
+        The shorthand will be replaced by the reason when the reason is logged.
+        """
+        async with self.config.guild(ctx.guild).reason_sh() as reason_sh:
+            if shorthand in reason_sh:
+                return await ctx.send("That shorthand already exists: `{}` - `{}`".format(shorthand, reason_sh[shorthand]))
+            
+            reason_sh[shorthand] = reason
+            
+            return await ctx.send("Added shorthand: `{}` - `{}`".format(shorthand, reason))
+        
+    @mpset_rsh.command(name="remove", aliases=["delete", "del"])
+    async def mpset_rsh_remove(self, ctx: commands.Context, shorthand: str):
+        """
+        Remove a reason shorthand.
+        """
+        async with self.config.guild(ctx.guild).reason_sh() as reason_sh:
+            if shorthand not in reason_sh:
+                return await ctx.send("That shorthand doesn't exist.")
+            
+            del reason_sh[shorthand]
+            
+            return await ctx.send("Removed shorthand: `{}`".format(shorthand))
+        
