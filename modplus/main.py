@@ -325,6 +325,7 @@ class ModPlus(commands.Cog):
         aliases=["mpset"],
         invoke_without_command=True,
     )
+    @commands.has_permissions(ban_members=True)
     async def mpset(self, ctx: commands.Context):
         return await ctx.send_help()
 
@@ -670,6 +671,7 @@ class ModPlus(commands.Cog):
     # <--- Moderation Commands --->
 
     @commands.command(name="warn")
+    @commands.has_permissions(ban_members=True)
     async def warn(
         self,
         ctx: commands.Context,
@@ -696,6 +698,7 @@ class ModPlus(commands.Cog):
         await self._dm_message(user, infraction)
 
     @commands.command(name="mute")
+    @commands.has_permissions(ban_members=True)
     async def mute(
         self,
         ctx: commands.Context,
@@ -723,6 +726,7 @@ class ModPlus(commands.Cog):
         await user.timeout(until, reason=reason)
 
     @commands.command(name="ban")
+    @commands.has_permissions(ban_members=True)
     async def ban(self, ctx: commands.Context, user: discord.Member, *, reason: str):
         """
         Ban a user.
@@ -739,6 +743,7 @@ class ModPlus(commands.Cog):
         await user.ban(reason=reason)
 
     @commands.command(name="tempban")
+    @commands.has_permissions(ban_members=True)
     async def tempban(
         self,
         ctx: commands.Context,
@@ -762,6 +767,7 @@ class ModPlus(commands.Cog):
         await user.ban(reason=reason)
 
     @commands.command(name="kick")
+    @commands.has_permissions(ban_members=True)
     async def kick(self, ctx: commands.Context, user: discord.Member, *, reason: str):
         """
         Kick a user.
@@ -780,6 +786,7 @@ class ModPlus(commands.Cog):
     # <--- Infractions --->
 
     @commands.group(name="infractions", aliases=["infraction"], invoke_without_command=True)
+    @commands.has_permissions(ban_members=True)
     async def infractions(self, ctx: commands.Context):
         """
         Infraction management commands.
@@ -848,6 +855,7 @@ class ModPlus(commands.Cog):
     # <--- User Lookup --->
 
     @commands.command(name="lookup")
+    @commands.has_permissions(ban_members=True)
     async def lookup(self, ctx: commands.Context, user: discord.User):
         """
         Lookup a user.
@@ -858,7 +866,7 @@ class ModPlus(commands.Cog):
         infractions = sm.infractions
         embed = discord.Embed(
             title=f"User Lookup",
-            description=f"User ID: {user.id}\nUsername: {user.display_name}\nInfractions: {len(infractions)}\nCreated At: <t:{int(user.created_at.timestamp())}:R>",
+            description=f"User ID: {user.id}\nUsername: {user.display_name}\nInfractions: {len(infractions)}\nCreated At: <t:{int(user.created_at.timestamp())}:R> (<t:{int(user.created_at.timestamp())}:F>))",
             color=discord.Color.red(),
         )
         if mem := ctx.guild.get_member(user.id):
