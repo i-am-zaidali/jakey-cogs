@@ -15,10 +15,42 @@ GUILD_DEFAULTS = {
     "reason_sh": {},
     "automod": {},
     "log_channel": None,
-    "log_message": None,
+    "log_message": (
+        "{embed(title):**New Action taken**}\n"
+        "{embed(description): **Issued by:**\n"
+        "{issuer(mention)} ({issuer(id)})\n"
+        "**Offender:**\n"
+        "{violator(mention)} ({violator(id)})\n"
+        "**Action Taken:**\n"
+        "*{type}ed*\n"
+        "**Reason:**\n"
+        "{reason}\n"
+        "**Duration**:\n"
+        "{if({duration}==Permanent):Permanent|<t:{math:round({unix}+{duration})}:F>}\n}"
+    ),
     "appeal_server": None,
-    "dm_message": None,
-    "channel_message": None,
+    "dm_message": (
+        "{stop({type}==mute)}\n"
+        "{=(infrom):{if({any({type}==ban|{type}==kick|{type}==tempban)}):from|in}}\n"
+        "{=(inv):{if({invite}!=):Here's a one time use invite link for you to appeal this action {invite}|}}\n"
+        "{=(dur):{if({duration}==Permanent):Permanently|until <t:{math:round({unix}+{duration})}:F>}}\n"
+        "{embed(title):**{upper({type}ed)}**}\n\n"
+        "{embed(description): You have been {capitalize({type})}ed in {server(name)} by {issuer(mention)} ({issuer})\n"
+        "{dur}}"
+    ),
+    "channel_message": (
+        "{embed(title):**New Action taken**}\n"
+        "{embed(description): **Issued by:**\n"
+        "{issuer(mention)} ({issuer(id)})\n"
+        "**Offender:**\n"
+        "{violator(mention)} ({violator(id)})\n"
+        "**Action Taken:**\n"
+        "*{type}ed*\n"
+        "**Reason:**\n"
+        "{reason}\n"
+        "**Duration**:\n"
+        "{if({duration}==Permanent):Permanent|<t:{math:round({unix}+{duration})}:F>}\n}"
+    ),
     # "channel_actions": {
     #     "ban": True,
     #     "kick": True,
