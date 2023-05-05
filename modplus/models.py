@@ -3,6 +3,7 @@ from typing import Optional, TYPE_CHECKING, Literal
 from dataclasses import dataclass
 from enum import Enum
 import discord
+import hashlib
 
 if TYPE_CHECKING:
     from .main import ModPlus as InfractionsCog
@@ -32,7 +33,7 @@ class ServerMember:
 
     @classmethod
     async def from_member(cls, cog: "InfractionsCog", member: discord.Member):
-        return cls.from_ids(cog, member.guild.id, member.id)
+        return await cls.from_ids(cog, member.guild.id, member.id)
 
     @classmethod
     async def from_ids(cls, cog: "InfractionsCog", guild_id: int, user_id: int):
@@ -62,6 +63,15 @@ class ServerMember:
         await cog._add_infraction(infraction)
         self.infractions.append(infraction)
         await cog._log_infraction(infraction)
+        return infraction
+
+    async def delete_infraction(self, cog: "InfractionsCog", infraction: "Infraction"):
+        await cog._remove_infraction(infraction)
+        self.infractions.remove(infraction)
+
+    async def clear_infractions(self, cog: "InfractionsCog"):
+        await cog._clear_infractions(self)
+        self.infractions.clear()
 
 
 @dataclass
@@ -74,6 +84,8 @@ class Infraction:
         duration: Optional[timedelta],
         violator: ServerMember,
         issuer_id: int,
+        *,
+        id: Optional[str] = None,
     ):
         self.type: InfractionType = type
         self.reason: str = reason
@@ -81,6 +93,14 @@ class Infraction:
         self.duration: Optional[timedelta] = duration
         self.violator: ServerMember = violator
         self.issuer_id: int = issuer_id
+        self.id = id or self._generate_id()
+
+    def _generate_id(self):
+        timestamp = str(self.at.timestamp()).encode("utf-8")
+        hash_object = hashlib.sha256(timestamp)
+        hex_dig = hash_object.hexdigest()
+        short_hash = hex_dig[:8]
+        return short_hash
 
     @property
     def lasts_until(self):
@@ -93,6 +113,7 @@ class Infraction:
     @property
     def json(self):
         return {
+            "id": self.id,
             "type": self.type.value,
             "reason": self.reason,
             "at": self.at.isoformat(),
@@ -109,4 +130,5 @@ class Infraction:
             duration=timedelta(seconds=json["duration"]) if json["duration"] else None,
             issuer_id=json["issuer_id"],
             violator=violator,
+            id=json["id"],
         )

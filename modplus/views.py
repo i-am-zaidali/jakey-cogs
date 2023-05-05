@@ -1,7 +1,19 @@
-from discord.ui import Button, Select, View, button
+from discord.emoji import Emoji
+from discord.enums import ButtonStyle
+from discord.interactions import Interaction
+from discord.partial_emoji import PartialEmoji
+from discord.ui import Button, Select, View, button, Modal, TextInput
 from redbot.core import commands
-from typing import List, Union, Callable, Coroutine, Any
+from redbot.core.utils import chat_formatting as cf
+from typing import List, Optional, Union, Callable, Coroutine, Any, TYPE_CHECKING
 import discord
+from redbot.core.bot import Red
+from .models import Infraction
+from copy import copy
+
+if TYPE_CHECKING:
+    from .main import ModPlus
+
 
 class ViewDisableOnTimeout(View):
     # I was too lazy to copypaste id rather have a mother class that implements this
@@ -20,6 +32,7 @@ class ViewDisableOnTimeout(View):
 
         self.stop()
 
+
 def disable_items(self: View):
     for i in self.children:
         i.disabled = True
@@ -37,7 +50,7 @@ async def interaction_check(ctx: commands.Context, interaction: discord.Interact
 
 class CloseButton(Button):
     def __init__(self):
-        super().__init__(style=discord.ButtonStyle.red, label="Close", emoji="❌")
+        super().__init__(style=discord.ButtonStyle.red, label="Close", emoji="❎")
 
     async def callback(self, interaction: discord.Interaction):
         await self.view.message.delete()
@@ -233,7 +246,7 @@ class PaginationView(ViewDisableOnTimeout):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return await interaction_check(self.ctx, interaction)
 
-    async def edit_message(self, inter: discord.Interaction):
+    def current_page(self) -> tuple[str, Optional[discord.Embed]]:
         if isinstance(self.contents[self.index], discord.Embed):
             embed = self.contents[self.index]
             content = ""
@@ -241,5 +254,79 @@ class PaginationView(ViewDisableOnTimeout):
             embed = None
             content = self.contents[self.index]
 
+        return content, embed
+
+    async def edit_message(self, inter: discord.Interaction):
+        content, embed = self.current_page()
+
         self.update_items()
         await inter.response.edit_message(content=content, embed=embed, view=self)
+
+
+class InfractionDeleteButton(Button):
+    def __init__(
+        self,
+        infraction: Infraction,
+        after_delete: Callable[
+            ["InfractionDeleteButton", discord.Interaction], Coroutine[Any, Any, Any]
+        ],
+    ):
+        super().__init__(style=discord.ButtonStyle.red, label="Delete")
+        self.infraction = infraction
+        self.after_delete = after_delete
+
+    async def callback(self, inter: discord.Interaction):
+        cog = self.view.cog
+
+        sm = self.infraction.violator
+
+        await sm.delete_infraction(cog, self.infraction)
+
+        await self.after_delete(self, inter)
+
+
+class InfractionView(ViewDisableOnTimeout):
+    def __init__(self, bot, infraction: Infraction, timeout: int = 30):
+        super().__init__(timeout=timeout)
+        self.bot = bot
+        self.infraction = infraction
+        self.add_item(InfractionDeleteButton(infraction, self.delete))
+
+    @property
+    def cog(self) -> "ModPlus":
+        return self.bot.get_cog("ModPlus")
+
+    @staticmethod
+    async def delete(self: InfractionDeleteButton, inter: discord.Interaction):
+        disable_items(self.view)
+
+        return await inter.response.edit_message(content="Infraction deleted.", view=None)
+
+
+class InfractionPagination(PaginationView):
+    def __init__(
+        self,
+        ctx: commands.Context,
+        contents: List[discord.Embed],
+        infractions: List[Infraction],
+        timeout: int = 30,
+    ):
+        self.infractions = infractions
+        super().__init__(ctx, contents, timeout)
+        self.add_item(InfractionDeleteButton(self._get_infraction(0), self.delete))
+
+    def _get_infraction(self, index: Optional[int] = None) -> Infraction:
+        return self.infractions[self.index if index is None else index]
+
+    @property
+    def cog(self) -> "ModPlus":
+        return self.ctx.cog
+
+    async def edit_message(self, inter: Interaction):
+        await super().edit_message(inter)
+        self.children[0].infraction = self._get_infraction()
+
+    @staticmethod
+    async def delete(self: InfractionDeleteButton, inter: discord.Interaction):
+        self.view.contents.remove(self.view.contents[self.view.index])
+        await inter.response.edit_message(content="Infraction deleted.", view=self.view)

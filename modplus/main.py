@@ -4,7 +4,10 @@ from redbot.core.bot import Red
 from typing import Literal, Optional, Union
 from .models import ServerMember, Infraction
 from datetime import datetime, timedelta, timezone
-from .views import YesOrNoView
+from .views import YesOrNoView, InfractionView, InfractionPagination
+from .tagscript import process_tagscript
+import TagScriptEngine as tse
+from discord.ext import tasks
 
 MEMBER_DEFAULTS = {"infractions": []}
 
@@ -37,8 +40,51 @@ class ModPlus(commands.Cog):
 
     # <--- Helpers --->
 
+    def _create_infraction_embed(self, infraction: Infraction):
+        embed = (
+            discord.Embed(
+                title=f"Infraction {infraction.id}",
+                description=f"Infraction Type: {infraction.type.value}\nOffender: <@{infraction.violator.user_id}>",
+                color=discord.Color.red(),
+            )
+            .add_field(
+                name="Reason",
+                value=infraction.reason,
+                inline=False,
+            )
+            .add_field(
+                name="Issuer",
+                value=f"<@{infraction.issuer_id}>",
+                inline=False,
+            )
+            .add_field(
+                name="Date Issued",
+                value=f"<t:{int(infraction.at.timestamp())}:R>",
+                inline=False,
+            )
+            .add_field(
+                name="Expired?",
+                value=(
+                    (
+                        f"Expires at <t:{int(infraction.lasts_until.timestamp())}:R>"
+                        if not infraction.expired
+                        else "Already expired"
+                    )
+                    if infraction.duration
+                    else "Never expires"
+                ),
+            )
+        )
+
+        return embed
+
     async def _get_infraction_count(self, guild_id: int, user_id: int) -> int:
         return len(await self._get_infractions(guild_id, user_id))
+
+    async def _get_non_expired_infraction_count(self, guild_id: int, user_id: int) -> int:
+        return len(
+            list(filter(lambda x: not x.expired, await self._get_infractions(guild_id, user_id)))
+        )
 
     async def _get_infraction(
         self, guild_id: int, user_id: int, infraction_id: int
@@ -63,7 +109,7 @@ class ModPlus(commands.Cog):
     async def _add_infraction(self, infraction: Infraction) -> Infraction:
         async with self.config.member_from_ids(
             infraction.violator.guild_id, infraction.violator.user_id
-        ).infraction() as infractions:
+        ).infractions() as infractions:
             infractions.append(infraction.json)
 
         return infraction
@@ -78,7 +124,13 @@ class ModPlus(commands.Cog):
         async with self.config.member_from_ids(
             infraction.violator.guild_id, infraction.violator.user_id
         ).infractions() as infractions:
-            infractions.remove(next(filter(lambda x: x["id"] == infraction.id, infraction.json)))
+            infractions.remove(next(filter(lambda x: x["id"] == infraction.id, infractions)))
+
+        return True
+
+    async def _clear_infractions(self, guild_id: int, user_id: int) -> bool:
+        async with self.config.member_from_ids(guild_id, user_id).infractions() as infractions:
+            infractions.clear()
 
         return True
 
@@ -102,28 +154,104 @@ class ModPlus(commands.Cog):
         return len(
             list(
                 filter(
-                    lambda x: x.type.value == "warn",
+                    lambda x: x.type.value == "warn" and not x.expired,
                     await self._get_infractions(guild_id, user_id),
                 )
             )
         )
 
     async def _log_infraction(self, infraction: Infraction):
-        ...
+        log_channel = await self.config.guild_from_id(infraction.violator.guild_id).log_channel()
+        if not log_channel:
+            return
 
-    async def _validate_action(
-        self,
-        ctx: commands.Context,
-        user: discord.Member,
-        action: Literal["ban", "kick", "mute", "warn", "tempban"],
-    ):
-        return all(
-            [
-                ctx.author.top_role > user.top_role,
-                ctx.me.top_role > user.top_role,
-                # permission checks will be implemented later
-            ]
+        guild = self.bot.get_guild(infraction.violator.guild_id)
+
+        chan = guild.get_channel(log_channel)
+        if not chan:
+            return
+
+        log_message = await self.config.guild_from_id(infraction.violator.guild_id).log_message()
+        if not log_message:
+            return
+
+        kwargs = process_tagscript(
+            log_message,
+            {
+                "server": tse.GuildAdapter(guild),
+                "violator": tse.MemberAdapter(guild.get_member(infraction.violator.user_id)),
+                "issuer": tse.MemberAdapter(guild.get_member(infraction.issuer_id)),
+                "reason": tse.StringAdapter(infraction.reason),
+                "id": tse.StringAdapter(str(infraction.id)),
+                "type": tse.StringAdapter(infraction.type.value),
+                "duration": tse.IntAdapter(infraction.duration.total_seconds())
+                if infraction.duration
+                else tse.StringAdapter("Permanent"),
+            },
         )
+
+        if not kwargs:
+            return
+
+        await chan.send(**kwargs)
+
+    async def _channel_message(self, channel: discord.TextChannel, infraction: Infraction):
+        message = await self.config.guild_from_id(infraction.violator.guild_id).channel_message()
+        guild = self.bot.get_guild(infraction.violator.guild_id)
+        kwargs = process_tagscript(
+            message,
+            {
+                "server": tse.GuildAdapter(guild),
+                "violator": tse.MemberAdapter(guild.get_member(infraction.violator.user_id)),
+                "issuer": tse.MemberAdapter(guild.get_member(infraction.issuer_id)),
+                "reason": tse.StringAdapter(infraction.reason),
+                "id": tse.StringAdapter(str(infraction.id)),
+                "type": tse.StringAdapter(infraction.type.value),
+                "duration": tse.IntAdapter(infraction.duration.total_seconds())
+                if infraction.duration
+                else tse.StringAdapter("Permanent"),
+            },
+        )
+
+        if not kwargs:
+            return
+
+        await channel.send(**kwargs)
+
+    async def _dm_message(self, user: discord.Member, infraction: Infraction):
+        message = await self.config.guild_from_id(infraction.violator.guild_id).dm_message()
+        guild = self.bot.get_guild(infraction.violator.guild_id)
+
+        invite = ""
+        if infraction.type.value in ("ban", "tempban", "kick"):
+            appeal = await self.config.guild_from_id(infraction.violator.guild_id).appeal_server()
+            if appeal:
+                server = self.bot.get_guild(appeal)
+                if server:
+                    invite = await server.channels[0].create_invite(
+                        max_uses=1, max_age=48 * 60 * 60, reason=f"Infraction Appeal for {user}"
+                    )
+
+        kwargs = process_tagscript(
+            message,
+            {
+                "server": tse.GuildAdapter(guild),
+                "invite": tse.StringAdapter(invite),
+                "violator": tse.MemberAdapter(guild.get_member(infraction.violator.user_id)),
+                "issuer": tse.MemberAdapter(guild.get_member(infraction.issuer_id)),
+                "reason": tse.StringAdapter(infraction.reason),
+                "id": tse.StringAdapter(str(infraction.id)),
+                "type": tse.StringAdapter(infraction.type.value),
+                "duration": tse.IntAdapter(infraction.duration.total_seconds())
+                if infraction.duration
+                else tse.StringAdapter("Permanent"),
+            },
+        )
+
+        if not kwargs:
+            return
+
+        await user.send(**kwargs)
 
     async def _appropriate_reason(self, guild_id: int, reason: str):
         shorthands = await self.config.guild_from_id(guild_id).reason_sh()
@@ -131,6 +259,62 @@ class ModPlus(commands.Cog):
             reason = reason.replace(shorthand, replacement)
 
         return reason
+
+    async def _check_automod(self, ctx: commands.Context, user: discord.Member):
+        count = await self._warn_infraction_count(user.guild.id, user.id)
+
+        am_counts = await self.config.guild(user.guild).automod()
+
+        try:
+            action = am_counts[count]
+
+        except KeyError:
+            return
+
+        else:
+            if isinstance(action, str):
+                await getattr(self, action)(
+                    ctx, user=user, reason=f"Automod action for {count} infractions"
+                )
+
+            elif isinstance(action, int):
+                await self.tempban(
+                    ctx,
+                    user=user,
+                    duration=timedelta(seconds=action),
+                    reason=f"Automod action for {count} infractions",
+                )
+
+    @tasks.loop(hours=1)
+    async def remove_tempbans(self):
+        guilds = await self.config.all_members()
+
+        for guild_id, guild_data in guilds.items():
+            guild = self.bot.get_guild(guild_id)
+            if not guild:
+                continue
+
+            for member_id, member_data in guild_data["members"].items():
+                for infraction in filter(
+                    lambda x: x["type"] == "tempban", member_data["infractions"]
+                ):
+                    if datetime.fromisoformat(infraction["duration"]) < datetime.utcnow():
+                        # check if user isnt already unbanned
+                        if not next(
+                            filter(
+                                lambda x: x.user.id == int(member_id),
+                                [x async for x in guild.bans()],
+                            ),
+                            None,
+                        ):
+                            continue
+                        await guild.unban(
+                            discord.Object(id=int(member_id)), reason="Tempban expired"
+                        )
+
+    @remove_tempbans.before_loop
+    async def before_remove_tempbans(self):
+        await self.bot.wait_until_red_ready()
 
     # <--- Commands --->
 
@@ -352,6 +536,15 @@ class ModPlus(commands.Cog):
         Use tagscript to generate a message that is sent to the log channel when a moderation action is performed.
 
         Use `clear` to remove the embed message or don't provide a tagscript to see the current message.
+
+        The following variables are available:
+        {server} - The server in which the moderation action was performed.
+        {violator} - The user who was moderated.
+        {issuer} - The user who performed the moderation action.
+        {reason} - The reason for the moderation action.
+        {id} - The ID of the moderation action.
+        {type} - The type of moderation action.
+        {duration} - The duration of the moderation action.
         """
         if tagscript == "clear":
             await self.config.guild(ctx.guild).log_message.clear()
@@ -419,6 +612,16 @@ class ModPlus(commands.Cog):
         Use tagscript to generate a message that is sent to the violator when a moderation action is performed.
 
         Use `clear` to remove the DM message or don't provide a tagscript to see the current message.
+
+        The following variables are available:
+        {server} - The server in which the moderation action was performed.
+        {violator} - The user who was moderated.
+        {issuer} - The user who performed the moderation action.
+        {reason} - The reason for the moderation action.
+        {id} - The ID of the moderation action.
+        {type} - The type of moderation action.
+        {duration} - The duration of the moderation action.
+        {invite} - the invite link to the appeal server. Only available if an appeal server is set and the moderation action is a ban, kick or tempban
         """
         if dm == "clear":
             await self.config.guild(ctx.guild).dm_message.clear()
@@ -432,6 +635,37 @@ class ModPlus(commands.Cog):
 
         await self.config.guild(ctx.guild).dm_message.set(dm)
         return await ctx.send(f"Set the DM message to ```{dm}```")
+
+    @mpset.command(name="channelmessage", aliases=["cm"])
+    async def mpset_channelmessage(
+        self, ctx: commands.Context, *, cm: Union[Literal["clear"], None, str] = None
+    ):
+        """
+        Use tagscript to generate a message that is sent to the channel where the moderation action was performed.
+
+        Use `clear` to remove the channel message or don't provide a tagscript to see the current message.
+
+        The following variables are available:
+        {server} - The server in which the moderation action was performed.
+        {violator} - The user who was moderated.
+        {issuer} - The user who performed the moderation action.
+        {reason} - The reason for the moderation action.
+        {id} - The ID of the moderation action.
+        {type} - The type of moderation action.
+        {duration} - The duration of the moderation action.
+        """
+        if cm == "clear":
+            await self.config.guild(ctx.guild).channel_message.clear()
+            return await ctx.send("Cleared the channel message.")
+
+        elif cm is None:
+            cm = await self.config.guild(ctx.guild).channel_message()
+            if cm is None:
+                return await ctx.send("There is no channel message set.")
+            return await ctx.send(f"The current channel message is ```{cm}```")
+
+        await self.config.guild(ctx.guild).channel_message.set(cm)
+        return await ctx.send(f"Set the channel message to ```{cm}```")
 
     # <--- Moderation Commands --->
 
@@ -457,7 +691,9 @@ class ModPlus(commands.Cog):
         reason = await self._appropriate_reason(ctx.guild.id, reason)
 
         sm = await ServerMember.from_member(self, user)
-        await sm.infraction(self, "warn", reason, ctx.author.id, duration=until)
+        infraction = await sm.infraction(self, "warn", reason, ctx.author.id, duration=until)
+        await self._channel_message(ctx.channel, infraction)
+        await self._dm_message(user, infraction)
 
     @commands.command(name="mute")
     async def mute(
@@ -481,7 +717,9 @@ class ModPlus(commands.Cog):
         reason = await self._appropriate_reason(ctx.guild.id, reason)
 
         sm = await ServerMember.from_member(self, user)
-        await sm.infraction(self, "mute", reason, ctx.author.id, duration=until)
+        infraction = await sm.infraction(self, "mute", reason, ctx.author.id, duration=until)
+        await self._channel_message(ctx.channel, infraction)
+        await self._dm_message(user, infraction)
         await user.timeout(until, reason=reason)
 
     @commands.command(name="ban")
@@ -495,7 +733,9 @@ class ModPlus(commands.Cog):
         reason = await self._appropriate_reason(ctx.guild.id, reason)
 
         sm = await ServerMember.from_member(self, user)
-        await sm.infraction(self, "ban", reason, ctx.author.id)
+        infraction = await sm.infraction(self, "ban", reason, ctx.author.id)
+        await self._channel_message(ctx.channel, infraction)
+        await self._dm_message(user, infraction)
         await user.ban(reason=reason)
 
     @commands.command(name="tempban")
@@ -516,7 +756,9 @@ class ModPlus(commands.Cog):
         reason = await self._appropriate_reason(ctx.guild.id, reason)
 
         sm = await ServerMember.from_member(self, user)
-        await sm.infraction(self, "tempban", reason, ctx.author.id, duration=until)
+        infraction = await sm.infraction(self, "tempban", reason, ctx.author.id, duration=until)
+        await self._channel_message(ctx.channel, infraction)
+        await self._dm_message(user, infraction)
         await user.ban(reason=reason)
 
     @commands.command(name="kick")
@@ -530,12 +772,14 @@ class ModPlus(commands.Cog):
         reason = await self._appropriate_reason(ctx.guild.id, reason)
 
         sm = await ServerMember.from_member(self, user)
-        await sm.infraction(self, "kick", reason, ctx.author.id)
+        infraction = await sm.infraction(self, "kick", reason, ctx.author.id)
+        await self._channel_message(ctx.channel, infraction)
+        await self._dm_message(user, infraction)
         await user.kick(reason=reason)
 
     # <--- Infractions --->
 
-    @commands.group(name="infractions", aliases=["infraction"])
+    @commands.group(name="infractions", aliases=["infraction"], invoke_without_command=True)
     async def infractions(self, ctx: commands.Context):
         """
         Infraction management commands.
@@ -561,6 +805,7 @@ class ModPlus(commands.Cog):
 
         sm = await ServerMember.from_member(self, user)
         await sm.delete_infraction(self, infraction_id)
+        await ctx.send("Infraction deleted.")
 
     @infractions.command(name="clear")
     async def infractions_clear(self, ctx: commands.Context, user: discord.Member):
@@ -569,10 +814,11 @@ class ModPlus(commands.Cog):
         """
         sm = await ServerMember.from_member(self, user)
         await sm.clear_infractions(self)
+        await ctx.send("Infractions cleared.")
 
     @infractions.command(name="show")
     async def infractions_show(
-        self, ctx: commands.Context, user: discord.Member, infraction_id: int
+        self, ctx: commands.Context, user: discord.Member, infraction_id: str
     ):
         """
         Show the infractions of a user.
@@ -582,44 +828,9 @@ class ModPlus(commands.Cog):
         if not infraction:
             return await ctx.send("That infraction does not exist.")
 
-        embed = (
-            discord.Embed(
-                title=f"Infraction {infraction_id}",
-                description=f"Infraction Type: {infraction.type.value}\nOffender: {user.mention}",
-                color=discord.Color.red(),
-            )
-            .add_field(
-                name="Reason",
-                value=infraction.reason,
-                inline=False,
-            )
-            .add_field(
-                name="Issuer",
-                value=f"<@{infraction.issuer_id}>",
-                inline=False,
-            )
-            .add_field(
-                name="Date Issued",
-                value=f"<t:{int(infraction.at.timestamp())}:R>",
-                inline=False,
-            )
-            .add_field(
-                name="Expired?",
-                value=(
-                    (
-                        f"Expires at <t:{int(infraction.lasts_until.timestamp())}:R>"
-                        if infraction.expired
-                        else "Already expired"
-                    )
-                    if infraction.duration
-                    else "Never expires"
-                ),
-            )
-        )
+        embed = self._create_infraction_embed(infraction)
 
-        await ctx.send(
-            embed=embed,
-        )  # view=InfractionView(self, user, infraction_id))
+        await ctx.send(embed=embed, view=InfractionView(self.bot, infraction))
 
     @infractions.command(name="list")
     async def infractions_list(self, ctx: commands.Context, user: discord.Member):
@@ -630,7 +841,9 @@ class ModPlus(commands.Cog):
         if not infractions:
             return await ctx.send("This user has no infractions.")
 
-        # TODO: Make a paginator view for this
+        embeds = [self._create_infraction_embed(infraction) for infraction in infractions]
+
+        await InfractionPagination(ctx, embeds, infractions).start()
 
     # <--- User Lookup --->
 

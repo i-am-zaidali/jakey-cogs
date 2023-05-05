@@ -2,7 +2,17 @@ import TagScriptEngine as tse
 from typing import Optional, TypedDict
 import discord
 
+
+class StringCaseBlock(tse.Block):
+    ACCEPTED_NAMES = ("lower", "upper", "title", "swapcase", "capitalize")
+
+    def process(self, ctx: tse.Context) -> str:
+        return getattr(ctx.verb.parameter, ctx.verb.declaration)()
+
+
 blocks = [
+    StringCaseBlock(),
+    tse.StrfBlock(),
     tse.LooseVariableGetterBlock(),
     tse.AssignmentBlock(),
     tse.IfBlock(),
@@ -11,6 +21,7 @@ blocks = [
     tse.StrictVariableGetterBlock(),
     tse.PythonBlock(),
     tse.BreakBlock(),
+    tse.MathBlock(),
     tse.StopBlock(),
 ]
 tagscript_engine = tse.Interpreter(blocks)
