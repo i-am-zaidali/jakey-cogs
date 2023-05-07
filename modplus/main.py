@@ -8,6 +8,7 @@ from .views import YesOrNoView, InfractionView, InfractionPagination
 from .tagscript import process_tagscript
 import TagScriptEngine as tse
 from discord.ext import tasks
+from redbot.core.utils import chat_formatting as cf
 
 MEMBER_DEFAULTS = {"infractions": []}
 
@@ -66,6 +67,13 @@ GUILD_DEFAULTS = {
 
 
 class ModPlus(commands.Cog):
+    """
+    A cog that adds more moderation commands and features to your server.
+    """
+
+    __version__ = "3.7.2"
+    __author__ = ["crayyy_zee#2900"]
+
     def __init__(self, bot: Red):
         self.bot = bot
 
@@ -73,6 +81,16 @@ class ModPlus(commands.Cog):
 
         self.config.register_member(**MEMBER_DEFAULTS)
         self.config.register_guild(**GUILD_DEFAULTS)
+
+    def format_help_for_context(self, ctx: commands.Context) -> str:
+        pre_processed = super().format_help_for_context(ctx) or ""
+        n = "\n" if "\n\n" not in pre_processed else ""
+        text = [
+            f"{pre_processed}{n}",
+            f"Cog Version: **{self.__version__}**",
+            f"Author: {cf.humanize_list(self.__author__)}",
+        ]
+        return "\n".join(text)
 
     # <--- Helpers --->
 

@@ -1,0 +1,16 @@
+{
+    "name": "ModPlus",
+    "short": "A moderation cog",
+    "description": "Moderation cog with extreme customizaility",
+    "end_user_data_statement": "This cog stores user ids to link them to their hosted giveaways.",
+    "install_msg": "Thanks for installing ModPlus. Load the cog with `[p]load modplus` and see all its commands with `[p]help ModPlus`",
+    "author": [
+        "crayyy_zee#2900"
+    ],
+    "required_cogs": {},
+    "requirements": [
+        "git+https://github.com/phenom4n4n/TagScript.git@dpy2"
+    ],
+    "tags": [],
+    "type": "COG"
+}
