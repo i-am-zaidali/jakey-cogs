@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from enum import Enum
 import discord
 import hashlib
+from redbot.core import commands
 
 if TYPE_CHECKING:
     from .main import ModPlus as InfractionsCog
@@ -45,12 +46,15 @@ class ServerMember:
 
     async def infraction(
         self,
-        cog: "InfractionsCog",
-        action: Literal["warn", "mute", "kick", "ban", "tempban"],
+        ctx: commands.Context,
         reason: str,
-        issuer_id: int,
         duration: Optional[timedelta] = None,
     ):
+        cog: "InfractionsCog" = ctx.cog
+        action: Literal["warn", "mute", "kick", "ban", "tempban"] = ctx.command.qualified_name
+        reason = reason or "No reason provided."
+        issuer_id = ctx.author.id
+
         infraction = Infraction(
             type=InfractionType.__members__[action.upper()],
             reason=reason,
@@ -62,7 +66,9 @@ class ServerMember:
 
         await cog._add_infraction(infraction)
         self.infractions.append(infraction)
-        await cog._log_infraction(infraction)
+        dms_open = await cog._dm_message(ctx.args[2], infraction)
+        await cog._channel_message(ctx.channel, infraction, dms_open=dms_open)
+        await cog._log_infraction(infraction, dms_open=dms_open)
         return infraction
 
     async def delete_infraction(self, cog: "InfractionsCog", infraction: "Infraction"):

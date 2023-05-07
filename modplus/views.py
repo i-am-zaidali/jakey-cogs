@@ -329,4 +329,6 @@ class InfractionPagination(PaginationView):
     @staticmethod
     async def delete(self: InfractionDeleteButton, inter: discord.Interaction):
         self.view.contents.remove(self.view.contents[self.view.index])
-        await inter.response.edit_message(content="Infraction deleted.", view=self.view)
+        await inter.response.edit_message(
+            content="Infraction deleted.", embed=None, view=self.view
+        )

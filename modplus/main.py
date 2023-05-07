@@ -26,7 +26,9 @@ GUILD_DEFAULTS = {
         "**Reason:**\n"
         "{reason}\n"
         "**Duration**:\n"
-        "{if({duration}==Permanent):Permanent|<t:{math:round({unix}+{duration})}:F>}\n}"
+        "{if({duration}==Permanent):Permanent|<t:{math:round({unix}+{duration})}:F>}\n\n"
+        "**DM'ed?**\n"
+        "{if({dms_open}):Yes|No, user might have dms closed.}\n}"
     ),
     "appeal_server": None,
     "dm_message": (
@@ -49,7 +51,9 @@ GUILD_DEFAULTS = {
         "**Reason:**\n"
         "{reason}\n"
         "**Duration**:\n"
-        "{if({duration}==Permanent):Permanent|<t:{math:round({unix}+{duration})}:F>}\n}"
+        "{if({duration}==Permanent):Permanent|<t:{math:round({unix}+{duration})}:F>}\n\n"
+        "**DM'ed?**\n"
+        "{if({dms_open}):Yes|No, user might have dms closed.}\n}"
     ),
     # "channel_actions": {
     #     "ban": True,
@@ -192,7 +196,7 @@ class ModPlus(commands.Cog):
             )
         )
 
-    async def _log_infraction(self, infraction: Infraction):
+    async def _log_infraction(self, infraction: Infraction, dms_open: bool):
         log_channel = await self.config.guild_from_id(infraction.violator.guild_id).log_channel()
         if not log_channel:
             return
@@ -219,6 +223,7 @@ class ModPlus(commands.Cog):
                 "duration": tse.IntAdapter(infraction.duration.total_seconds())
                 if infraction.duration
                 else tse.StringAdapter("Permanent"),
+                "dms_open": tse.StringAdapter(dms_open),
             },
         )
 
@@ -227,7 +232,9 @@ class ModPlus(commands.Cog):
 
         await chan.send(**kwargs)
 
-    async def _channel_message(self, channel: discord.TextChannel, infraction: Infraction):
+    async def _channel_message(
+        self, channel: discord.TextChannel, infraction: Infraction, dms_open: bool
+    ):
         message = await self.config.guild_from_id(infraction.violator.guild_id).channel_message()
         guild = self.bot.get_guild(infraction.violator.guild_id)
         kwargs = process_tagscript(
@@ -242,6 +249,7 @@ class ModPlus(commands.Cog):
                 "duration": tse.IntAdapter(infraction.duration.total_seconds())
                 if infraction.duration
                 else tse.StringAdapter("Permanent"),
+                "dms_open": tse.StringAdapter(dms_open),
             },
         )
 
@@ -281,9 +289,16 @@ class ModPlus(commands.Cog):
         )
 
         if not kwargs:
-            return
+            return False
 
-        await user.send(**kwargs)
+        try:
+            await user.send(**kwargs)
+
+        except Exception:
+            return False
+
+        else:
+            return True
 
     async def _appropriate_reason(self, guild_id: int, reason: str):
         shorthands = await self.config.guild_from_id(guild_id).reason_sh()
@@ -316,6 +331,14 @@ class ModPlus(commands.Cog):
                     duration=timedelta(seconds=action),
                     reason=f"Automod action for {count} infractions",
                 )
+
+    async def _validate_action(self, ctx: commands.Context, user: discord.Member, action: str):
+        return all(
+            [
+                ctx.me.top_role > user.top_role,
+                ctx.author.top_role > user.top_role,
+            ]
+        )
 
     @tasks.loop(hours=1)
     async def remove_tempbans(self):
@@ -561,14 +584,18 @@ class ModPlus(commands.Cog):
         await self.config.guild(ctx.guild).log_channel.set(channel.id)
         return await ctx.send(f"Set the log channel to {channel.mention}.")
 
-    @mpset_log.command(name="embed")
+    @mpset_log.command(name="message")
     async def mpset_log_message(
-        self, ctx: commands.Context, *, tagscript: Union[Literal["clear"], None, str] = None
+        self,
+        ctx: commands.Context,
+        *,
+        tagscript: Union[Literal["clear", "default"], None, str] = None,
     ):
         """
         Use tagscript to generate a message that is sent to the log channel when a moderation action is performed.
 
         Use `clear` to remove the embed message or don't provide a tagscript to see the current message.
+        Use `default` to set the message to the default message.
 
         The following variables are available:
         {server} - The server in which the moderation action was performed.
@@ -578,10 +605,15 @@ class ModPlus(commands.Cog):
         {id} - The ID of the moderation action.
         {type} - The type of moderation action.
         {duration} - The duration of the moderation action.
+        {dms_open} - Whether or not the violator's DMs were open and the bot was able to DM them.
         """
         if tagscript == "clear":
-            await self.config.guild(ctx.guild).log_message.clear()
+            await self.config.guild(ctx.guild).log_message.set("")
             return await ctx.send("Cleared the log message.")
+
+        if tagscript == "default":
+            await self.config.guild(ctx.guild).log_message.clear()
+            return await ctx.send("Set the log message to the default message.")
 
         elif tagscript is None:
             tagscript = await self.config.guild(ctx.guild).log_message()
@@ -605,7 +637,7 @@ class ModPlus(commands.Cog):
 
         embed = discord.Embed(
             title=f"Logging Settings for {ctx.guild.name}",
-            description=f"Log Channel: {getattr(log_channel, 'mention', 'N/A')}\nLog Message: ```{log_message or 'N/A'}```",
+            description=f"Log Channel: {getattr(ctx.guild.get_channel(log_channel), 'mention', 'N/A')}\nLog Message: ```{log_message or 'N/A'}```",
             color=await ctx.bot.get_embed_color(ctx.channel),
         )
 
@@ -639,12 +671,13 @@ class ModPlus(commands.Cog):
 
     @mpset.command(name="dm")
     async def mpset_dm(
-        self, ctx: commands.Context, *, dm: Union[Literal["clear"], None, str] = None
+        self, ctx: commands.Context, *, dm: Union[Literal["clear", "default"], None, str] = None
     ):
         """
         Use tagscript to generate a message that is sent to the violator when a moderation action is performed.
 
         Use `clear` to remove the DM message or don't provide a tagscript to see the current message.
+        Use `default` to set the message to the default message.
 
         The following variables are available:
         {server} - The server in which the moderation action was performed.
@@ -657,8 +690,12 @@ class ModPlus(commands.Cog):
         {invite} - the invite link to the appeal server. Only available if an appeal server is set and the moderation action is a ban, kick or tempban
         """
         if dm == "clear":
-            await self.config.guild(ctx.guild).dm_message.clear()
+            await self.config.guild(ctx.guild).dm_message.set("")
             return await ctx.send("Cleared the DM message.")
+
+        elif dm == "default":
+            await self.config.guild(ctx.guild).dm_message.clear()
+            return await ctx.send("Set the DM message to the default message.")
 
         elif dm is None:
             dm = await self.config.guild(ctx.guild).dm_message()
@@ -671,7 +708,7 @@ class ModPlus(commands.Cog):
 
     @mpset.command(name="channelmessage", aliases=["cm"])
     async def mpset_channelmessage(
-        self, ctx: commands.Context, *, cm: Union[Literal["clear"], None, str] = None
+        self, ctx: commands.Context, *, cm: Union[Literal["clear", "default"], None, str] = None
     ):
         """
         Use tagscript to generate a message that is sent to the channel where the moderation action was performed.
@@ -690,6 +727,10 @@ class ModPlus(commands.Cog):
         if cm == "clear":
             await self.config.guild(ctx.guild).channel_message.clear()
             return await ctx.send("Cleared the channel message.")
+
+        elif cm == "default":
+            await self.config.guild(ctx.guild).channel_message.clear()
+            return await ctx.send("Set the channel message to the default message.")
 
         elif cm is None:
             cm = await self.config.guild(ctx.guild).channel_message()
@@ -725,9 +766,7 @@ class ModPlus(commands.Cog):
         reason = await self._appropriate_reason(ctx.guild.id, reason)
 
         sm = await ServerMember.from_member(self, user)
-        infraction = await sm.infraction(self, "warn", reason, ctx.author.id, duration=until)
-        await self._channel_message(ctx.channel, infraction)
-        await self._dm_message(user, infraction)
+        infraction = await sm.infraction(ctx, reason, until)
 
     @commands.command(name="mute")
     @commands.has_permissions(ban_members=True)
@@ -752,9 +791,7 @@ class ModPlus(commands.Cog):
         reason = await self._appropriate_reason(ctx.guild.id, reason)
 
         sm = await ServerMember.from_member(self, user)
-        infraction = await sm.infraction(self, "mute", reason, ctx.author.id, duration=until)
-        await self._channel_message(ctx.channel, infraction)
-        await self._dm_message(user, infraction)
+        infraction = await sm.infraction(ctx, reason, duration=until)
         await user.timeout(until, reason=reason)
 
     @commands.command(name="ban")
@@ -769,9 +806,7 @@ class ModPlus(commands.Cog):
         reason = await self._appropriate_reason(ctx.guild.id, reason)
 
         sm = await ServerMember.from_member(self, user)
-        infraction = await sm.infraction(self, "ban", reason, ctx.author.id)
-        await self._channel_message(ctx.channel, infraction)
-        await self._dm_message(user, infraction)
+        infraction = await sm.infraction(ctx, reason)
         await user.ban(reason=reason)
 
     @commands.command(name="tempban")
@@ -793,9 +828,7 @@ class ModPlus(commands.Cog):
         reason = await self._appropriate_reason(ctx.guild.id, reason)
 
         sm = await ServerMember.from_member(self, user)
-        infraction = await sm.infraction(self, "tempban", reason, ctx.author.id, duration=until)
-        await self._channel_message(ctx.channel, infraction)
-        await self._dm_message(user, infraction)
+        infraction = await sm.infraction(ctx, reason, duration=until)
         await user.ban(reason=reason)
 
     @commands.command(name="kick")
@@ -810,9 +843,7 @@ class ModPlus(commands.Cog):
         reason = await self._appropriate_reason(ctx.guild.id, reason)
 
         sm = await ServerMember.from_member(self, user)
-        infraction = await sm.infraction(self, "kick", reason, ctx.author.id)
-        await self._channel_message(ctx.channel, infraction)
-        await self._dm_message(user, infraction)
+        infraction = await sm.infraction(ctx, reason)
         await user.kick(reason=reason)
 
     # <--- Infractions --->
