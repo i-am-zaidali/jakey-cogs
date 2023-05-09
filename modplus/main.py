@@ -357,6 +357,14 @@ class ModPlus(commands.Cog):
             [
                 ctx.me.top_role > user.top_role,
                 ctx.author.top_role > user.top_role,
+                ctx.me.guild_permissions
+                >= discord.Permissions(
+                    manage_roles=True,
+                    kick_members=True,
+                    ban_members=True,
+                    manage_guild=True,
+                    moderate_members=True,
+                ),
             ]
         )
 
@@ -790,13 +798,6 @@ class ModPlus(commands.Cog):
 
     @commands.command(name="mute")
     @commands.has_permissions(ban_members=True)
-    @commands.bot_has_permissions(
-        manage_roles=True,
-        kick_members=True,
-        ban_members=True,
-        manage_server=True,
-        timeout_members=True,
-    )
     async def mute(
         self,
         ctx: commands.Context,
@@ -823,13 +824,6 @@ class ModPlus(commands.Cog):
 
     @commands.command(name="ban")
     @commands.has_permissions(ban_members=True)
-    @commands.bot_has_permissions(
-        manage_roles=True,
-        kick_members=True,
-        ban_members=True,
-        manage_server=True,
-        timeout_members=True,
-    )
     async def ban(
         self,
         ctx: commands.Context,
@@ -853,13 +847,6 @@ class ModPlus(commands.Cog):
 
     @commands.command(name="kick")
     @commands.has_permissions(ban_members=True)
-    @commands.bot_has_permissions(
-        manage_roles=True,
-        kick_members=True,
-        ban_members=True,
-        manage_server=True,
-        timeout_members=True,
-    )
     async def kick(self, ctx: commands.Context, user: discord.Member, *, reason: str):
         """
         Kick a user.
