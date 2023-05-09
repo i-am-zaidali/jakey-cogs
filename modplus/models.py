@@ -51,9 +51,12 @@ class ServerMember:
         duration: Optional[timedelta] = None,
     ):
         cog: "InfractionsCog" = ctx.cog
-        action: Literal["warn", "mute", "kick", "ban", "tempban"] = ctx.command.qualified_name
+        action: Literal["warn", "mute", "kick", "ban"] = ctx.command.qualified_name
         reason = reason or "No reason provided."
         issuer_id = ctx.author.id
+
+        if action == "ban" and duration:
+            action = "tempban"
 
         infraction = Infraction(
             type=InfractionType.__members__[action.upper()],
@@ -66,7 +69,8 @@ class ServerMember:
 
         await cog._add_infraction(infraction)
         self.infractions.append(infraction)
-        dms_open = await cog._dm_message(ctx.args[2], infraction)
+        include_invite = ctx.args[-1] if action in ("ban", "tempban") else False
+        dms_open = await cog._dm_message(ctx.args[2], infraction, include_invite=include_invite)
         await cog._channel_message(ctx.channel, infraction, dms_open=dms_open)
         await cog._log_infraction(infraction, dms_open=dms_open)
         return infraction

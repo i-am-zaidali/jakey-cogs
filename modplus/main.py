@@ -276,12 +276,14 @@ class ModPlus(commands.Cog):
 
         await channel.send(**kwargs)
 
-    async def _dm_message(self, user: discord.Member, infraction: Infraction):
+    async def _dm_message(
+        self, user: discord.Member, infraction: Infraction, include_invite: bool = True
+    ):
         message = await self.config.guild_from_id(infraction.violator.guild_id).dm_message()
         guild = self.bot.get_guild(infraction.violator.guild_id)
 
         invite = ""
-        if infraction.type.value in ("ban", "tempban", "kick"):
+        if infraction.type.value in ("ban", "tempban", "kick") and include_invite:
             appeal = await self.config.guild_from_id(infraction.violator.guild_id).appeal_server()
             if appeal:
                 server = self.bot.get_guild(appeal)
@@ -788,6 +790,13 @@ class ModPlus(commands.Cog):
 
     @commands.command(name="mute")
     @commands.has_permissions(ban_members=True)
+    @commands.bot_has_permissions(
+        manage_roles=True,
+        kick_members=True,
+        ban_members=True,
+        manage_server=True,
+        timeout_members=True,
+    )
     async def mute(
         self,
         ctx: commands.Context,
@@ -814,31 +823,24 @@ class ModPlus(commands.Cog):
 
     @commands.command(name="ban")
     @commands.has_permissions(ban_members=True)
-    async def ban(self, ctx: commands.Context, user: discord.Member, *, reason: str):
-        """
-        Ban a user.
-        """
-        if not await self._validate_action(ctx, user, "ban"):
-            return await ctx.send("You cannot ban this user.")
-
-        reason = await self._appropriate_reason(ctx.guild.id, reason)
-
-        sm = await ServerMember.from_member(self, user)
-        infraction = await sm.infraction(ctx, reason)
-        await user.ban(reason=reason)
-
-    @commands.command(name="tempban")
-    @commands.has_permissions(ban_members=True)
-    async def tempban(
+    @commands.bot_has_permissions(
+        manage_roles=True,
+        kick_members=True,
+        ban_members=True,
+        manage_server=True,
+        timeout_members=True,
+    )
+    async def ban(
         self,
         ctx: commands.Context,
         user: discord.Member,
-        until: commands.get_timedelta_converter(allowed_units=["hours", "days", "weeks"]),
+        until: commands.get_timedelta_converter(allowed_units=["hours", "days", "weeks"]) = None,
+        send_invite: Optional[bool] = True,
         *,
         reason: str,
     ):
         """
-        Temporarily ban a user.
+        Ban a user.
         """
         if not await self._validate_action(ctx, user, "ban"):
             return await ctx.send("You cannot ban this user.")
@@ -851,6 +853,13 @@ class ModPlus(commands.Cog):
 
     @commands.command(name="kick")
     @commands.has_permissions(ban_members=True)
+    @commands.bot_has_permissions(
+        manage_roles=True,
+        kick_members=True,
+        ban_members=True,
+        manage_server=True,
+        timeout_members=True,
+    )
     async def kick(self, ctx: commands.Context, user: discord.Member, *, reason: str):
         """
         Kick a user.
