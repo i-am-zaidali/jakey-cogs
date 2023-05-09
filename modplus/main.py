@@ -197,6 +197,16 @@ class ModPlus(commands.Cog):
         for member in await self.config.all_members(guild_id):
             await self.config.member_from_ids(guild_id, member).watchlist.clear()
 
+    async def _notify_watchlist_of_infraction(self, ctx: commands.Context, infraction: Infraction):
+        wl_channel_id = await self.config.guild(ctx.guild).watchlist.channel()
+        wl_notify = await self.config.guild(ctx.guild).watchlist.notify()
+        wl_channel = ctx.guild.get_channel(wl_channel_id)
+
+        if not all((wl_channel_id, wl_channel, wl_notify)):
+            return
+
+        # TODO: add notification sending
+
     def _create_infraction_embed(self, infraction: Infraction):
         embed = (
             discord.Embed(
@@ -254,7 +264,7 @@ class ModPlus(commands.Cog):
         )
 
     async def _get_infractions(self, guild_id: int, user_id: int) -> list[Infraction]:
-        sm = ServerMember(guild_id, user_id, [])
+        sm = ServerMember(guild_id, user_id, [], {})
         infractions = await self.config.member_from_ids(guild_id, user_id).infractions()
         return list(
             map(
@@ -516,6 +526,9 @@ class ModPlus(commands.Cog):
         await self._channel_message(ctx.channel, infraction, dms_open=dms_open)
         await self._log_infraction(infraction, dms_open=dms_open)
 
+        if sm.is_being_watched:
+            await self._notify_watchlist_of_infraction(ctx, infraction)
+
         await self._check_automod(ctx, ctx.guild.get_member(infraction.violator.user_id))
 
     # <--- Commands --->
@@ -541,6 +554,22 @@ class ModPlus(commands.Cog):
         return await ctx.send_help()
 
     @mpset_wl.command(name="channel", aliases=["ch"])
+    async def mpset_wl_channel(self, ctx: commands.Context, channel: discord.TextChannel):
+        """
+        Set the channel that watchlist notifications will be sent to.
+        """
+        await self.config.guild(ctx.guild).watchlist.channel.set(channel.id)
+        await ctx.send(f"Watchlist notifications will be sent to {channel.mention}")
+
+    @mpset_wl.command(name="notifyoninfraction", aliases=["noi"])
+    async def mpset_wl_notifyoninfraction(self, ctx: commands.Context, toggle: bool):
+        """
+        Toggle whether or not to notify the watchlist when a user is added to the watchlist.
+        """
+        await self.config.guild(ctx.guild).watchlist.notify_on_infraction.set(toggle)
+        await ctx.send(
+            f"Watchlist will {'now' if toggle else 'no longer'} notify on infractions done by users on the watchlist"
+        )
 
     # <--- Reason Shorthands --->
 
@@ -1076,6 +1105,18 @@ class ModPlus(commands.Cog):
         if mem := ctx.guild.get_member(user.id):
             embed.add_field(name="Joined At", value=f"<t:{int(mem.joined_at.timestamp())}:R>")
             embed.add_field(name="Server Nickname", value=mem.display_name)
+            embed.add_field(
+                name="Watchlist",
+                value=(
+                    f"Being watched: {sm.is_being_watched}\n"
+                    + (
+                        f"Watchlist reason: {sm.watchlist_reason}\n"
+                        f"Watchlist expires : <t:{int(sm.watchlist_expiry.timestamp())}:R> (<t:{int(sm.watchlist_expires_at.timestamp())}:F>)"
+                        if sm.is_being_watched
+                        else ""
+                    )
+                ),
+            )
 
         embed.set_thumbnail(url=user.display_avatar.url)
         await ctx.send(embed=embed)

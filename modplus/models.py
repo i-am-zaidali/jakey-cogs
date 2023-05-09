@@ -27,6 +27,21 @@ class ServerMember:
     guild_id: int
     user_id: int
     infractions: list["Infraction"]
+    watchlist: dict[str, str] | None
+
+    @property
+    def is_being_watched(self):
+        return self.watchlist is not None
+
+    @property
+    def watchlist_reason(self):
+        return self.watchlist["reason"] if self.is_being_watched else None
+
+    @property
+    def watchlist_expiry(self):
+        return (
+            datetime.fromisoformat(self.watchlist["duration"]) if self.is_being_watched else None
+        )
 
     @property
     def json(self):
@@ -38,11 +53,20 @@ class ServerMember:
 
     @classmethod
     async def from_ids(cls, cog: "InfractionsCog", guild_id: int, user_id: int):
-        return cls(
+        self = cls(
             guild_id=guild_id,
             user_id=user_id,
-            infractions=await cog._get_infractions(guild_id, user_id),
+            infractions=[],
+            watchlist=await cog._get_watchlist_status(guild_id, user_id),
         )
+
+        self.infractions = list(
+            map(
+                lambda infraction: (infraction, setattr(infraction.violator, self))[0],
+                await cog._get_infractions(guild_id, user_id),
+            )
+        )
+        return self
 
     async def infraction(
         self,
