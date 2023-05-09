@@ -4,13 +4,19 @@ from redbot.core.bot import Red
 from typing import Literal, Optional, Union
 from .models import ServerMember, Infraction
 from datetime import datetime, timedelta, timezone
-from .views import YesOrNoView, InfractionView, InfractionPagination
+from .views import YesOrNoView, InfractionView, InfractionPagination, PaginationView
 from .tagscript import process_tagscript
 import TagScriptEngine as tse
 from discord.ext import tasks
 from redbot.core.utils import chat_formatting as cf
 
-MEMBER_DEFAULTS = {"infractions": []}
+timedelta_converter = commands.get_timedelta_converter(
+    allowed_units=["hours", "days", "weeks", "months", "years"]
+)
+
+MEMBER_DEFAULTS = {"infractions": [], "watchlist": None}
+# infractions: list[Infraction]
+# watchlist: {duration: datetime | None, reason: str}
 
 GUILD_DEFAULTS = {
     "reason_sh": {},
@@ -56,14 +62,62 @@ GUILD_DEFAULTS = {
         "**DM'ed?**\n"
         "{if({dms_open}):Yes|No, user might have dms closed.}\n}"
     ),
-    # "channel_actions": {
-    #     "ban": True,
-    #     "kick": True,
-    #     "mute": True,
-    #     "warn": True,
-    #     "tempban": True,
-    # }
+    "whitelist": {
+        "channel": None,
+        "notify": False,
+    },
 }
+
+
+@staticmethod
+async def group_embeds_by_fields(
+    *fields: dict[str, Union[str, bool]],
+    per_embed: int = 3,
+    page_in_footer: Union[str, bool] = True,
+    **kwargs,
+) -> list[discord.Embed]:
+    """
+    This was the result of a big brain moment i had
+
+    This method takes dicts of fields and groups them into separate embeds
+    keeping `per_embed` number of fields per embed.
+
+    page_in_footer can be passed either as a boolen value ( True to enable, False to disable. in which case the footer will look like `Page {index of page}/{total pages}` )
+    Or it can be passed as a string template to format. The allowed variables are: `page` and `total_pages`
+
+    Extra kwargs can be passed to create embeds off of.
+    """
+
+    fix_kwargs = lambda kwargs: {
+        next(x): (fix_kwargs({next(x): v}) if "__" in k else v)
+        for k, v in kwargs.copy().items()
+        if (x := iter(k.split("__", 1)))
+    }
+
+    kwargs = fix_kwargs(kwargs)
+    # yea idk man.
+
+    groups: list[discord.Embed] = []
+    page_format = ""
+    if page_in_footer:
+        kwargs.get("footer", {}).pop("text", None)  # to prevent being overridden
+        page_format = (
+            page_in_footer if isinstance(page_in_footer, str) else "Page {page}/{total_pages}"
+        )
+
+    ran = list(range(0, len(fields), per_embed))
+
+    for ind, i in enumerate(ran):
+        groups.append(
+            discord.Embed.from_dict(kwargs)
+        )  # append embeds in the loop to prevent incorrect embed count
+        fields_to_add = fields[i : i + per_embed]
+        for field in fields_to_add:
+            groups[ind].add_field(**field)
+
+        if page_format:
+            groups[ind].set_footer(text=page_format.format(page=ind + 1, total_pages=len(ran)))
+    return groups
 
 
 class ModPlus(commands.Cog):
@@ -93,6 +147,55 @@ class ModPlus(commands.Cog):
         return "\n".join(text)
 
     # <--- Helpers --->
+
+    async def _get_watchlist(
+        self, guild_id: int
+    ) -> dict[int, dict[str, Union[str, datetime, None]]]:
+        guild = self.bot.get_guild(guild_id)
+        return dict(
+            map(
+                lambda x: (
+                    x[0],
+                    dict(
+                        (
+                            ("reason", x[1]["watchlist"]["reason"]),
+                            (
+                                "duration",
+                                datetime.fromisoformat(x[1]["watchlist"]["duration"])
+                                if x[1]["watchlist"]["duration"] is not None
+                                else None,
+                            ),
+                        )
+                    ),
+                ),
+                filter(
+                    lambda x: x[1]["watchlist"] is not None,
+                    (await self.config.all_members(guild)).items(),
+                ),
+            )
+        )
+
+    async def _get_watchlist_status(self, guild_id: int, user_id: int):
+        watchlist = await self.config.member_from_ids(guild_id, user_id).watchlist()
+        return watchlist
+
+    async def _add_to_watchlist(
+        self,
+        guild_id: int,
+        user_id: int,
+        reason: str,
+        duration: Union[datetime, None],
+    ):
+        await self.config.member_from_ids(guild_id, user_id).watchlist.set(
+            {"reason": reason, "duration": duration.isoformat() if duration else None}
+        )
+
+    async def _remove_from_watchlist(self, guild_id: int, user_id: int):
+        await self.config.member_from_ids(guild_id, user_id).watchlist.clear()
+
+    async def _clear_watchlist(self, guild_id: int):
+        for member in await self.config.all_members(guild_id):
+            await self.config.member_from_ids(guild_id, member).watchlist.clear()
 
     def _create_infraction_embed(self, infraction: Infraction):
         embed = (
@@ -345,10 +448,10 @@ class ModPlus(commands.Cog):
                 )
 
             elif isinstance(action, int):
-                await self.tempban(
+                await self.ban(
                     ctx,
                     user=user,
-                    duration=timedelta(seconds=action),
+                    until=timedelta(seconds=action),
                     reason=f"Automod action for {count} infractions",
                 )
 
@@ -367,6 +470,8 @@ class ModPlus(commands.Cog):
                 ),
             ]
         )
+
+    # <--- Tempban Expiry loop --->
 
     @tasks.loop(hours=1)
     async def remove_tempbans(self):
@@ -399,6 +504,20 @@ class ModPlus(commands.Cog):
     async def before_remove_tempbans(self):
         await self.bot.wait_until_red_ready()
 
+    # <--- listeners --->
+
+    @commands.Cog.listener()
+    async def on_modplus_infraction(
+        self, ctx: commands.Context, sm: ServerMember, infraction: Infraction
+    ):
+        await self._add_infraction(infraction)
+        include_invite = ctx.args[-1] if infraction.type.value in ("ban", "tempban") else False
+        dms_open = await self._dm_message(ctx.args[2], infraction, include_invite=include_invite)
+        await self._channel_message(ctx.channel, infraction, dms_open=dms_open)
+        await self._log_infraction(infraction, dms_open=dms_open)
+
+        await self._check_automod(ctx, ctx.guild.get_member(infraction.violator.user_id))
+
     # <--- Commands --->
 
     # <--- Setting Commands --->
@@ -411,6 +530,17 @@ class ModPlus(commands.Cog):
     @commands.has_permissions(ban_members=True)
     async def mpset(self, ctx: commands.Context):
         return await ctx.send_help()
+
+    # <--- Watchlist --->
+
+    @mpset.group(name="watchlist", aliases=["wl"], invoke_without_command=True)
+    async def mpset_wl(self, ctx: commands.Context):
+        """
+        Watchlists are lists of users that will be watched for certain actions.
+        """
+        return await ctx.send_help()
+
+    @mpset_wl.command(name="channel", aliases=["ch"])
 
     # <--- Reason Shorthands --->
 
@@ -531,9 +661,7 @@ class ModPlus(commands.Cog):
                     timeout=60,
                 )
                 try:
-                    time: timedelta = await commands.get_timedelta_converter(
-                        allowed_units=["hours", "days", "weeks"]
-                    ).convert(ctx, msg.content)
+                    time: timedelta = await timedelta_converter.convert(ctx, msg.content)
                 except TimeoutError:
                     return await ctx.send("Timed Out.")
                 except ValueError:
@@ -777,9 +905,7 @@ class ModPlus(commands.Cog):
         self,
         ctx: commands.Context,
         user: discord.Member,
-        until: Optional[
-            commands.get_timedelta_converter(allowed_units=["hours", "days", "weeks"])
-        ] = None,
+        until: Optional[timedelta_converter] = None,
         *,
         reason: str,
     ):
@@ -802,9 +928,7 @@ class ModPlus(commands.Cog):
         self,
         ctx: commands.Context,
         user: discord.Member,
-        until: Optional[
-            commands.get_timedelta_converter(allowed_units=["hours", "days", "weeks"])
-        ] = None,
+        until: Optional[timedelta_converter] = None,
         *,
         reason: str,
     ):
@@ -828,7 +952,7 @@ class ModPlus(commands.Cog):
         self,
         ctx: commands.Context,
         user: discord.Member,
-        until: commands.get_timedelta_converter(allowed_units=["hours", "days", "weeks"]) = None,
+        until: timedelta_converter = None,
         send_invite: Optional[bool] = True,
         *,
         reason: str,
@@ -952,3 +1076,87 @@ class ModPlus(commands.Cog):
 
         embed.set_thumbnail(url=user.display_avatar.url)
         await ctx.send(embed=embed)
+
+    # <--- Watchlist --->
+
+    @commands.group(name="watchlist", invoke_without_command=True)
+    @commands.has_permissions(ban_members=True)
+    async def watchlist(self, ctx: commands.Context):
+        """
+        See the watchlist.
+
+        Use subcommands to manage the watchlist.
+        """
+
+        guild_watchlist = await self._get_watchlist(ctx.guild.id)
+
+        # filter out member ids that are no longer in guild
+        guild_watchlist: dict[int, dict[str, Union[str, datetime, None]]] = dict(
+            filter(lambda x: ctx.guild.get_member(x[0]) is not None, guild_watchlist.items())
+        )
+
+        if not guild_watchlist:
+            return await ctx.send("The watchlist is empty.")
+
+        fields = []
+        for user_id, data in guild_watchlist.items():
+            user = ctx.guild.get_member(user_id)
+            duration = (
+                f"<t:{int(data['duration'].timestamp())}:R>" if data["duration"] else "Never"
+            )
+            fields.append(
+                dict(
+                    name=f"{user.display_name} ({user.id})",
+                    value=f"**Reason:** {data['reason']}\n**Expires:** {duration}",
+                    inline=False,
+                )
+            )
+
+        embeds = await group_embeds_by_fields(
+            *fields,
+            6,
+            page_in_footer=True,
+            title=f"Watchlist for {ctx.guild.name}",
+            description=f"Total: {len(guild_watchlist)}",
+            color=discord.Color.red(),
+            thumbnail=ctx.guild.icon.url,
+        )
+
+        await PaginationView(ctx, embeds).start()
+
+    @watchlist.command(name="add")
+    @commands.has_permissions(ban_members=True)
+    async def watchlist_add(
+        self,
+        ctx: commands.Context,
+        user: discord.Member,
+        duration: Optional[timedelta_converter] = None,
+        *,
+        reason: str,
+    ):
+        """
+        Add a user to the watchlist.
+        """
+        if duration is not None:
+            duration = datetime.now(tz=timezone.utc) + duration
+
+        await self._add_to_watchlist(ctx.guild.id, user.id, reason, duration)
+        await ctx.send("User added to watchlist.")
+
+    @watchlist.command(name="remove")
+    @commands.has_permissions(ban_members=True)
+    async def watchlist_remove(self, ctx: commands.Context, user: discord.Member):
+        """
+        Remove a user from the watchlist.
+        """
+        await self._remove_from_watchlist(ctx.guild.id, user.id)
+        await ctx.send("User removed from watchlist.")
+
+    @watchlist.command(name="clear")
+    @commands.has_permissions(ban_members=True)
+    async def watchlist_clear(self, ctx: commands.Context):
+        """
+        Clear the watchlist.
+        """
+        await self._clear_watchlist(ctx.guild.id)
+        await ctx.send("Watchlist cleared.")
