@@ -619,6 +619,9 @@ class ModPlus(commands.Cog):
         Infraction based automod.
 
         If a user has more than `infraction_count` infractions, they will be actioned.
+        Automod actions are also counted as infraction. So do not add automod for consecutive infraction counts.
+        For example, if you have automod for 3 and 4 infractions, and the user has 3 infractions, they will be actioned.
+        Which will add another infraction, making it 4. Which will action them again. And so on.
 
         Use `clear` for the `action` argument to remove the automod for that infraction count.
         """
