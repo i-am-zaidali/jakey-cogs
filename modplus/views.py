@@ -1,15 +1,12 @@
-from discord.emoji import Emoji
-from discord.enums import ButtonStyle
 from discord.interactions import Interaction
-from discord.partial_emoji import PartialEmoji
-from discord.ui import Button, Select, View, button, Modal, TextInput
+from discord.ui import Button, Select, View, button, select
 from redbot.core import commands
-from redbot.core.utils import chat_formatting as cf
 from typing import List, Optional, Union, Callable, Coroutine, Any, TYPE_CHECKING
 import discord
 from redbot.core.bot import Red
 from .models import Infraction
-from copy import copy
+from .utils import timedelta_converter
+import asyncio
 
 if TYPE_CHECKING:
     from .main import ModPlus
@@ -332,3 +329,197 @@ class InfractionPagination(PaginationView):
         await inter.response.edit_message(
             content="Infraction deleted.", embed=None, view=self.view
         )
+
+
+class ActionSelectView(ViewDisableOnTimeout):
+    def __init__(self, violator: discord.Member, timeout: int = 30):
+        self.violator = violator
+        super().__init__(timeout=timeout)
+
+    @property
+    def cog(self) -> "ModPlus":
+        return self.bot.get_cog("ModPlus")
+
+    @select(
+        options=[
+            discord.SelectOption(label="Kick User", value="kick"),
+            discord.SelectOption(label="Ban User", value="ban"),
+            discord.SelectOption(label="Mute User", value="mute"),
+            discord.SelectOption(label="Warn User", value="warn"),
+        ],
+        max_values=1,
+        placeholder="Select the action you want to perform",
+    )
+    async def on_select(self, select: discord.ui.Select, inter: discord.Interaction):
+        ctx = commands.Context.from_interaction(inter)
+        kwargs = {"ctx": ctx, "user": self.violator, "reason": "Flagged Message"}
+        if select.values[0] in ["mute", "ban"]:
+            await inter.response.send_message(
+                "Please send the duration of the punishment. (hours, days, weeks)"
+            )
+            try:
+                msg = await inter.client.wait_for(
+                    "message", check=lambda m: m.author == inter.author, timeout=60
+                )
+                duration = await timedelta_converter().convert(ctx, msg.content)
+
+            except asyncio.TimeoutError:
+                return await inter.response.send_message(
+                    "You took too long to respond. Cancelling the action."
+                )
+
+            except commands.BadArgument:
+                return await inter.response.send_message(
+                    "Invalid duration provided. Cancelling the action."
+                )
+
+            kwargs["until"] = duration
+
+        await getattr(self.cog, select.values[0])(**kwargs)
+
+
+class FlaggingView(View):
+    def __init__(self, bot: Red):
+        self.bot = bot
+        super().__init__(timeout=None)
+
+    @property
+    def cog(self) -> "ModPlus":
+        return self.bot.get_cog("ModPlus")
+
+    async def interaction_check(self, interaction: discord.Interaction):
+        if not self.cog:
+            await interaction.response.send_message("Cog is not loaded.")
+            return False
+        return (
+            interaction.user.get_role(
+                await self.cog.config.guild(interaction.guild).flagging.mod_role()
+            )
+            is not None
+        )
+
+    def get_ids_from_embed(self, embed: discord.Embed):
+        ids = embed.footer.text.split("-")
+        return int(ids[0]), int(ids[1])
+
+    async def get_message_details(self, guild_id: int, channel_id: int, message_id: int):
+        return await self.cog.config.custom("FLAGGED", guild_id, channel_id, message_id).all()
+
+    @button(
+        label="Delete Original Message",
+        style=discord.ButtonStyle.red,
+        emoji="🗑️",
+        custom_id="delete_org_msg",
+    )
+    async def delete_original(self, inter: discord.Interaction, button: discord.ui.Button):
+        channel_id, message_id = self.get_ids_from_embed(inter.message.embeds[0])
+        channel = inter.client.get_channel(channel_id)
+
+        if not channel:
+            await self.cog.config.custom("FLAGGED", inter.guild_id, channel_id, message_id).clear()
+            await inter.response.send_message(
+                "The channel for this flagged message could not be found so I'm removing this as a flagged message."
+            )
+            disable_items(self)
+            return await inter.message.edit(view=self)
+
+        try:
+            message = discord.PartialMessage(channel=channel, id=message_id)
+            await message.delete()
+
+        except discord.NotFound:
+            await inter.response.send_message(
+                "The message for this flagged message could not be found so I'm removing this as a flagged message."
+            )
+            return
+        else:
+            return await inter.response.send_message("Message deleted.", ephemeral=True)
+
+    @button(
+        label="Take Action", style=discord.ButtonStyle.blurple, emoji="🛡️", custom_id="take_action"
+    )
+    async def take_action(self, inter: discord.Interaction, button: discord.ui.Button):
+        channel_id, message_id = self.get_ids_from_embed(inter.message.embeds[0])
+        details = await self.get_message_details(inter.guild_id, channel_id, message_id)
+
+        author_id = details["author_id"]
+
+        guild = inter.client.get_guild(inter.guild_id)
+
+        if author_id == inter.user.id:
+            return await inter.response.send_message(
+                "You cannot take action on your own message.", ephemeral=True
+            )
+
+        elif not (mem := guild.get_member(author_id)):
+            await self.cog.config.custom("FLAGGED", inter.guild_id, channel_id, message_id).clear()
+            disable_items(self)
+            await inter.message.edit(view=self)
+            return await inter.response.send_message(
+                "The author of this message is no longer in the server. I'll be removing this message as flagged",
+                ephemeral=True,
+            )
+
+        await inter.response.send_message(
+            "Select the action you want to take.", ephemeral=True, view=ActionSelectView(mem, 60)
+        )
+
+    @button(label="Clear Flag", style=discord.ButtonStyle.green, emoji="🚩", custom_id="clear_flag")
+    async def clear_flag(self, inter: discord.Interaction, button: discord.ui.Button):
+        channel_id, message_id = self.get_ids_from_embed(inter.message.embeds[0])
+        if await self.cog.config.custom(
+            "FLAGGED", inter.guild_id, channel_id, message_id
+        ).cleared():
+            return await inter.response.send_message(
+                "This message has already been cleared.", ephemeral=True
+            )
+        await self.cog.config.custom("FLAGGED", inter.guild_id, channel_id, message_id).set_raw(
+            "cleared", value=True
+        )
+        await inter.response.send_message("Flag cleared.", ephemeral=True)
+
+    @button(
+        label="List of Reporters",
+        style=discord.ButtonStyle.grey,
+        emoji="📋",
+        custom_id="list_reporters",
+    )
+    async def list_reporters(self, inter: discord.Interaction, button: discord.ui.Button):
+        channel_id, message_id = self.get_ids_from_embed(inter.message.embeds[0])
+        channel = inter.client.get_channel(channel_id)
+
+        if not channel:
+            await self.cog.config.custom("FLAGGED", inter.guild_id, channel_id, message_id).clear()
+            await inter.response.send_message(
+                "The channel for this flagged message could not be found so I'm removing this as a flagged message."
+            )
+            return await inter.message.edit(view=self)
+
+        try:
+            message = await channel.fetch_message(message_id)
+
+        except discord.NotFound:
+            await inter.response.send_message(
+                "The message for this flagged message could not be found so I'm removing this as a flagged message."
+            )
+            return
+
+        else:
+            emoji = await self.cog.config.guild(inter.guild_id).flagging.emoji()
+            reaction = discord.utils.get(message.reactions, emoji=emoji)
+            if not reaction:
+                return await inter.response.send_message(
+                    "The flagging reaction has bene removed from this message so I can't tell who flagged this message",
+                    ephemeral=True,
+                )
+
+            reporters = [i async for i in reaction.users()]
+
+            embed = discord.Embed(
+                title="List of Reporters",
+                description=f"Total Reporters: {len(reporters)}"
+                + "\n".join([f"<@{i}> ({i.id})" for i in reporters]),
+                color=discord.Color.green(),
+            )
+
+            await inter.response.send_message(embed=embed, ephemeral=True)

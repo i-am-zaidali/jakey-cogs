@@ -4,15 +4,16 @@ from redbot.core.bot import Red
 from typing import Literal, Optional, Union
 from .models import ServerMember, Infraction
 from datetime import datetime, timedelta, timezone
-from .views import YesOrNoView, InfractionView, InfractionPagination, PaginationView
+from .views import YesOrNoView, InfractionView, InfractionPagination, PaginationView, FlaggingView
 from .tagscript import process_tagscript
 import TagScriptEngine as tse
 from discord.ext import tasks
 from redbot.core.utils import chat_formatting as cf
+from .utils import timedelta_converter, EmojiConverter, group_embeds_by_fields
+from cachetools import TTLCache
 
-timedelta_converter = commands.get_timedelta_converter(
-    allowed_units=["hours", "days", "weeks", "months", "years"]
-)
+FLAGGED_MESSAGE = {}
+# { guild_id: { channel_id: { message_id: { author_id: int, content: int, timestamp: str, alert_message: int, cleared: bool} } } }
 
 MEMBER_DEFAULTS = {"infractions": [], "watchlist": None}
 # infractions: list[Infraction]
@@ -62,62 +63,19 @@ GUILD_DEFAULTS = {
         "**DM'ed?**\n"
         "{if({dms_open}):Yes|No, user might have dms closed.}\n}"
     ),
-    "whitelist": {
+    "watchlist": {
         "channel": None,
         "notify": False,
+        "infraction_message": "{violator(mention)} ({violator(id)}) has just been **{type}ed** for **{reason}**. They were already on the watchlist",
+    },
+    "flagging": {
+        "emoji": "🚩",
+        "channel": None,
+        "ping_threshold": 4,
+        "mod_role": None,
+        "cooldown": 300,
     },
 }
-
-
-@staticmethod
-async def group_embeds_by_fields(
-    *fields: dict[str, Union[str, bool]],
-    per_embed: int = 3,
-    page_in_footer: Union[str, bool] = True,
-    **kwargs,
-) -> list[discord.Embed]:
-    """
-    This was the result of a big brain moment i had
-
-    This method takes dicts of fields and groups them into separate embeds
-    keeping `per_embed` number of fields per embed.
-
-    page_in_footer can be passed either as a boolen value ( True to enable, False to disable. in which case the footer will look like `Page {index of page}/{total pages}` )
-    Or it can be passed as a string template to format. The allowed variables are: `page` and `total_pages`
-
-    Extra kwargs can be passed to create embeds off of.
-    """
-
-    fix_kwargs = lambda kwargs: {
-        next(x): (fix_kwargs({next(x): v}) if "__" in k else v)
-        for k, v in kwargs.copy().items()
-        if (x := iter(k.split("__", 1)))
-    }
-
-    kwargs = fix_kwargs(kwargs)
-    # yea idk man.
-
-    groups: list[discord.Embed] = []
-    page_format = ""
-    if page_in_footer:
-        kwargs.get("footer", {}).pop("text", None)  # to prevent being overridden
-        page_format = (
-            page_in_footer if isinstance(page_in_footer, str) else "Page {page}/{total_pages}"
-        )
-
-    ran = list(range(0, len(fields), per_embed))
-
-    for ind, i in enumerate(ran):
-        groups.append(
-            discord.Embed.from_dict(kwargs)
-        )  # append embeds in the loop to prevent incorrect embed count
-        fields_to_add = fields[i : i + per_embed]
-        for field in fields_to_add:
-            groups[ind].add_field(**field)
-
-        if page_format:
-            groups[ind].set_footer(text=page_format.format(page=ind + 1, total_pages=len(ran)))
-    return groups
 
 
 class ModPlus(commands.Cog):
@@ -125,7 +83,7 @@ class ModPlus(commands.Cog):
     A cog that adds more moderation commands and features to your server.
     """
 
-    __version__ = "3.7.2"
+    __version__ = "1.2.0"
     __author__ = ["crayyy_zee#2900"]
 
     def __init__(self, bot: Red):
@@ -135,6 +93,21 @@ class ModPlus(commands.Cog):
 
         self.config.register_member(**MEMBER_DEFAULTS)
         self.config.register_guild(**GUILD_DEFAULTS)
+
+        self.config.init_custom("FLAGGED", 3)
+
+        self.cooldown_cache: dict[int, TTLCache] = {}
+
+        self.flagging_view = FlaggingView(self.bot)
+        self._update_view()
+
+    def _update_view(self):
+        for view in filter(
+            lambda x: x.__class__.__name__ == "FlaggingView", self.bot.persistent_views
+        ):
+            view.stop()
+
+        self.bot.add_view(self.flagging_view)
 
     def format_help_for_context(self, ctx: commands.Context) -> str:
         pre_processed = super().format_help_for_context(ctx) or ""
@@ -177,6 +150,13 @@ class ModPlus(commands.Cog):
 
     async def _get_watchlist_status(self, guild_id: int, user_id: int):
         watchlist = await self.config.member_from_ids(guild_id, user_id).watchlist()
+        if (
+            watchlist
+            and watchlist["duration"]
+            and datetime.fromisoformat(watchlist["duration"]) < datetime.utcnow()
+        ):
+            await self._remove_from_watchlist(guild_id, user_id)
+            return None
         return watchlist
 
     async def _add_to_watchlist(
@@ -201,11 +181,67 @@ class ModPlus(commands.Cog):
         wl_channel_id = await self.config.guild(ctx.guild).watchlist.channel()
         wl_notify = await self.config.guild(ctx.guild).watchlist.notify()
         wl_channel = ctx.guild.get_channel(wl_channel_id)
+        wl_message = await self.config.guild(ctx.guild).watchlist.infraction_message()
 
-        if not all((wl_channel_id, wl_channel, wl_notify)):
+        if not all((wl_channel_id, wl_channel, wl_notify, wl_message)):
             return
 
-        # TODO: add notification sending
+        kwargs = process_tagscript(
+            wl_message,
+            {
+                "server": tse.GuildAdapter(ctx.guild),
+                "violator": tse.MemberAdapter(ctx.guild.get_member(infraction.violator.user_id)),
+                "issuer": tse.MemberAdapter(ctx.guild.get_member(infraction.issuer_id)),
+                "reason": tse.StringAdapter(infraction.reason),
+                "id": tse.StringAdapter(str(infraction.id)),
+                "type": tse.StringAdapter(infraction.type.value),
+                "duration": tse.IntAdapter(infraction.duration.total_seconds())
+                if infraction.duration
+                else tse.StringAdapter("Permanent"),
+            },
+        )
+
+        if not kwargs:
+            return
+
+        await wl_channel.send(**kwargs)
+
+    def _create_flag_embed(self, flagger: discord.Member, reaction: discord.Reaction):
+        message = reaction.message
+        embed = (
+            discord.Embed(
+                title="**MESSAGE FLAGGED**",
+                description=f"Message flagged by {flagger.mention} ({flagger.id})",
+                color=discord.Color.yellow(),
+            )
+            .add_field(
+                name="Message Content",
+                value=f"||{message.content[:197] + ('...' if len(message.content) > 197 else '')}||",
+                inline=False,
+            )
+            .add_field(
+                name="Message Author",
+                value=f"{message.author.mention} ({message.author.id})",
+                inline=False,
+            )
+            .add_field(
+                name="Message Channel",
+                value=f"{message.channel.mention} ({message.channel.id})",
+                inline=False,
+            )
+            .add_field(
+                name="Message Link",
+                value=f"{message.jump_url}",
+                inline=False,
+            )
+            .add_field(
+                name="Flagged By",
+                value=f"{reaction.count} users",
+            )
+            .set_footer(text=f"{message.channel.id}-{message.id}")
+        )
+
+        return embed
 
     def _create_infraction_embed(self, infraction: Infraction):
         embed = (
@@ -532,6 +568,105 @@ class ModPlus(commands.Cog):
 
         await self._check_automod(ctx, ctx.guild.get_member(infraction.violator.user_id))
 
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if not message.guild or message.author.bot:
+            return
+
+        if message.channel.id != await self.config.guild(message.guild).watchlist.channel():
+            return
+
+        if message.mentions:
+            user = message.mentions[0]
+            stat = await self._get_watchlist_status(message.guild.id, user.id)
+            if stat:
+                duration = (
+                    f"until <t:{int(stat['duration'].timestamp())}:R>"
+                    if stat["duration"]
+                    else "Permanently"
+                )
+                msg = f"User {user.mention} ({user.id}) is on the watchlist {duration}"
+
+            else:
+                msg = f"User {user.mention} ({user.id}) is not on the watchlist"
+
+            await message.channel.send(msg)
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
+        if not payload.guild_id:
+            return
+
+        guild = self.bot.get_guild(payload.guild_id)
+
+        if str(payload.emoji) != await self.config.guild(guild).flagging.emoji():
+            return
+
+        fc = guild.get_channel(await self.config.guild(guild).flagging.channel())
+        if not fc:
+            print("No flagging channel set")
+            return
+
+        try:
+            message = await self.bot.get_channel(payload.channel_id).fetch_message(
+                payload.message_id
+            )
+
+        except discord.NotFound:
+            print("Message not found")
+            return
+
+        reaction = next(
+            filter(lambda x: str(x.emoji) == str(payload.emoji), message.reactions), None
+        )
+        if not reaction:
+            print("Reaction not found", message.reactions)
+            return
+
+        message_details = await self.config.custom(
+            "FLAGGED", payload.guild_id, payload.channel_id, payload.message_id
+        ).all()
+        if not message_details:
+            print("No message details")
+            if not (cache := self.cooldown_cache.get(payload.guild_id)):
+                self.cooldown_cache[payload.message_id] = cache = TTLCache(
+                    5, await self.config.guild(guild).flagging.cooldown()
+                )
+                cache.update({payload.user_id: message.id})
+
+            else:
+                if cache.get(payload.user_id):
+                    print("Cooldown")
+                    return
+
+            embed = self._create_flag_embed(payload.member, reaction)
+
+            view = self.flagging_view
+
+            msg = await fc.send(embed=embed, view=view)
+
+            message_details = {
+                "content": message.content,
+                "author_id": message.author.id,
+                "timestamp": message.created_at.isoformat(),
+                "alert_message": msg.id,
+                "cleared": False,
+            }
+
+            await self.config.custom(
+                "FLAGGED", payload.guild_id, payload.channel_id, payload.message_id
+            ).set(message_details)
+
+        threshold = await self.config.guild(guild).flagging.ping_threshold()
+        if reaction.count >= threshold:
+            ping_role = await self.config.guild(guild).flagging.mod_role()
+            alert_message = discord.PartialMessage(channel=fc, id=message_details["alert_message"])
+            await fc.send(
+                f"<@&{ping_role}> need your attention on this",
+                reference=alert_message,
+                allowed_mentions=discord.AllowedMentions(roles=True),
+            )
+
     # <--- Commands --->
 
     # <--- Setting Commands --->
@@ -544,6 +679,81 @@ class ModPlus(commands.Cog):
     @commands.has_permissions(ban_members=True)
     async def mpset(self, ctx: commands.Context):
         return await ctx.send_help()
+
+    # <--- Flagging --->
+
+    @mpset.group(name="flag", aliases=["fl"], invoke_without_command=True)
+    async def mpset_flag(self, ctx: commands.Context):
+        """
+        Flags are used to mark message by normal users for review by moderators.
+        """
+        return await ctx.send_help()
+
+    @mpset_flag.command(name="emoji", aliases=["em"])
+    async def mpset_flag_emoji(self, ctx: commands.Context, emoji: EmojiConverter):
+        """
+        Set the emoji that will be used to flag messages.
+        """
+        if isinstance(emoji, discord.Emoji):
+            emoji = str(emoji)
+
+        await self.config.guild(ctx.guild).flagging.emoji.set(emoji)
+        await ctx.send(f"Flag emoji set to {emoji}")
+
+    @mpset_flag.command(name="channel", aliases=["ch"])
+    async def mpset_flag_channel(self, ctx: commands.Context, channel: discord.TextChannel):
+        """
+        Set the channel that flagged messages will be sent to.
+        """
+        await self.config.guild(ctx.guild).flagging.channel.set(channel.id)
+        await ctx.send(f"Flagged messages will be sent to {channel.mention}")
+
+    @mpset_flag.command(name="modrole", aliases=["mr"])
+    async def mpset_flag_modrole(self, ctx: commands.Context, role: discord.Role):
+        """
+        Set the role that will be pinged when a message is flagged.
+        """
+        await self.config.guild(ctx.guild).flagging.mod_role.set(role.id)
+        await ctx.send(f"{role.mention} will be pinged when a message is flagged.")
+
+    @mpset_flag.command(name="cooldown", aliases=["cd"])
+    async def mpset_flag_cooldown(self, ctx: commands.Context, cooldown: int):
+        """
+        Set the cooldown between flagging messages.
+
+        Cooldown must be in seconds
+        """
+        await self.config.guild(ctx.guild).flagging.cooldown.set(cooldown)
+        await ctx.send(f"Flagging cooldown set to {cooldown} seconds.")
+
+    @mpset_flag.command(name="threshold", aliases=["th"])
+    async def mpset_flag_threshold(self, ctx: commands.Context, threshold: int):
+        """
+        Set the threshold for flagging messages.
+
+        Threshold is the number of flags a message must receive before the mod role is pinged.
+        """
+        await self.config.guild(ctx.guild).flagging.ping_threshold.set(threshold)
+        await ctx.send(f"Flagging threshold set to {threshold}.")
+
+    @mpset_flag.command(name="show")
+    async def mpset_flag_show(self, ctx: commands.Context):
+        """
+        Show the current flagging settings.
+        """
+        flagging = await self.config.guild(ctx.guild).flagging()
+        await ctx.send(
+            cf.box(
+                f"""
+            Flagging settings for {ctx.guild.name}:
+                    Flag emoji: {flagging['emoji']}
+                    Flag channel: {ctx.guild.get_channel(flagging['channel'])}
+                    Mod role: {ctx.guild.get_role(flagging['mod_role'])}
+                    Cooldown: {flagging['cooldown']}
+                    Threshold: {flagging['ping_threshold']}
+                """
+            )
+        )
 
     # <--- Watchlist --->
 
@@ -570,6 +780,57 @@ class ModPlus(commands.Cog):
         await self.config.guild(ctx.guild).watchlist.notify_on_infraction.set(toggle)
         await ctx.send(
             f"Watchlist will {'now' if toggle else 'no longer'} notify on infractions done by users on the watchlist"
+        )
+
+    @mpset_wl.command(name="notifymessage", aliases=["nm"])
+    async def mpset_wl_notifymessage(
+        self, ctx: commands.Context, *, message: Union[Literal["clear", "default"], None, str]
+    ):
+        """
+        Set the message that will be sent when a user is added to the watchlist.
+
+        Use `clear` to clear the message, `default` to set the message to the default message.
+
+        The following variables are available:
+        {server} - The server in which the moderation action was performed.
+        {violator} - The user who was moderated.
+        {issuer} - The user who performed the moderation action.
+        {reason} - The reason for the moderation action.
+        {id} - The ID of the moderation action.
+        {type} - The type of moderation action.
+        {duration} - The duration of the moderation action.
+        """
+        if message == "clear":
+            await self.config.guild(ctx.guild).watchlist.infraction_message.clear()
+            return await ctx.send("Watchlist notify message cleared")
+
+        elif message == "default":
+            await self.config.guild(ctx.guild).watchlist.infraction_message.clear()
+            return await ctx.send("Watchlist notify message set to default")
+
+        elif message is None:
+            return await ctx.send(
+                f"The current notify message is:\n```\n{await self.config.guild(ctx.guild).watchlist.infraction_message()}```"
+            )
+
+        await self.config.guild(ctx.guild).watchlist.infraction_message.set(message)
+        await ctx.send("Watchlist notify message set")
+
+    @mpset_wl.command(name="show")
+    async def mpset_wl_show(self, ctx: commands.Context):
+        """
+        Show the current watchlist settings.
+        """
+        watchlist = await self.config.guild(ctx.guild).watchlist()
+        await ctx.send(
+            cf.box(
+                f"""
+            Watchlist settings for {ctx.guild.name}:
+                    Watchlist channel: {ctx.guild.get_channel(watchlist['channel'])}
+                    Notify on infraction: {watchlist['notify']}
+                    Notify message: {watchlist['infraction_message']}
+                """
+            )
         )
 
     # <--- Reason Shorthands --->
@@ -1161,12 +1422,12 @@ class ModPlus(commands.Cog):
 
         embeds = await group_embeds_by_fields(
             *fields,
-            6,
+            per_embed=6,
             page_in_footer=True,
             title=f"Watchlist for {ctx.guild.name}",
             description=f"Total: {len(guild_watchlist)}",
-            color=discord.Color.red(),
-            thumbnail=ctx.guild.icon.url,
+            color=discord.Color.red().value,
+            thumbnail=getattr(ctx.guild.icon, "url", None),
         )
 
         await PaginationView(ctx, embeds).start()
