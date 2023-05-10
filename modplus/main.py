@@ -604,7 +604,6 @@ class ModPlus(commands.Cog):
 
         fc = guild.get_channel(await self.config.guild(guild).flagging.channel())
         if not fc:
-            print("No flagging channel set")
             return
 
         try:
@@ -613,21 +612,18 @@ class ModPlus(commands.Cog):
             )
 
         except discord.NotFound:
-            print("Message not found")
             return
 
         reaction = next(
             filter(lambda x: str(x.emoji) == str(payload.emoji), message.reactions), None
         )
         if not reaction:
-            print("Reaction not found", message.reactions)
             return
 
         message_details = await self.config.custom(
             "FLAGGED", payload.guild_id, payload.channel_id, payload.message_id
         ).all()
         if not message_details:
-            print("No message details")
             if not (cache := self.cooldown_cache.get(payload.guild_id)):
                 self.cooldown_cache[payload.message_id] = cache = TTLCache(
                     5, await self.config.guild(guild).flagging.cooldown()
@@ -636,7 +632,6 @@ class ModPlus(commands.Cog):
 
             else:
                 if cache.get(payload.user_id):
-                    print("Cooldown")
                     return
 
             embed = self._create_flag_embed(payload.member, reaction)
