@@ -452,18 +452,13 @@ class ModPlus(commands.Cog):
             return
 
         else:
-            if isinstance(action, str):
-                await getattr(self, action)(
-                    ctx, user=user, reason=f"Automod action for {count} infractions"
-                )
+            kwargs = dict(ctx=ctx, user=user, reason=f"Automod action for {count} infractions")
+            if len(a := action.split()) > 1:
+                action = a[0]
+                duration = timedelta(seconds=int(a[1]))
+                kwargs.update(until=duration)
 
-            elif isinstance(action, int):
-                await self.ban(
-                    ctx,
-                    user=user,
-                    until=timedelta(seconds=action),
-                    reason=f"Automod action for {count} infractions",
-                )
+            await getattr(self, action)(**kwargs)
 
     async def _validate_action(self, ctx: commands.Context, user: discord.Member, action: str):
         return all(
@@ -478,6 +473,12 @@ class ModPlus(commands.Cog):
                     manage_guild=True,
                     moderate_members=True,
                 ),
+            ]
+        ) or any(
+            [
+                ctx.guild.owner_id == ctx.author.id,
+                await ctx.bot.is_owner(ctx.author),
+                await ctx.bot.is_mod(ctx.author),
             ]
         )
 
@@ -657,15 +658,15 @@ class ModPlus(commands.Cog):
 
         async with self.config.guild(ctx.guild).automod() as automod:
             if action == "clear":
-                if infraction_count not in automod:
+                if not automod.get(str(infraction_count)):
                     return await ctx.send("There is no automod for that infraction count.")
 
-                del automod[infraction_count]
+                del automod[str(infraction_count)]
                 return await ctx.send(
                     "Removed automod for infraction count: `{}`".format(infraction_count)
                 )
 
-            if a := automod.get(infraction_count):
+            if a := automod.get(str(infraction_count)):
                 view = YesOrNoView(ctx, "", "Alright, it will remain the same.")
                 if isinstance(a, int):
                     await ctx.send(
@@ -683,9 +684,9 @@ class ModPlus(commands.Cog):
                 if not view.value:
                     return
 
-            if action == "tempban":
+            if action in ("tempban", "mute"):
                 await ctx.send(
-                    "How long do you want to tempban the user for? (days, weeks, hours)"
+                    f"How long do you want to {action} the user for? (days, weeks, hours)"
                 )
                 msg = await ctx.bot.wait_for(
                     "message",
@@ -693,13 +694,13 @@ class ModPlus(commands.Cog):
                     timeout=60,
                 )
                 try:
-                    time: timedelta = await timedelta_converter.convert(ctx, msg.content)
+                    time: timedelta = await timedelta_converter().convert(ctx, msg.content)
                 except TimeoutError:
                     return await ctx.send("Timed Out.")
                 except ValueError:
                     return await ctx.send("That is not a valid number.")
                 else:
-                    automod[infraction_count] = int(time.total_seconds())
+                    automod[infraction_count] = f"{action} {int(time.total_seconds())}"
 
             else:
                 automod[infraction_count] = action
@@ -723,6 +724,8 @@ class ModPlus(commands.Cog):
             description="\n".join(
                 [
                     f"`{infraction_count}` - `{action}`"
+                    if len(a := action.split()) == 1
+                    else f"`{infraction_count}` - `{a[0]} for {cf.humanize_timedelta(seconds=int(a[1]))}`"
                     for infraction_count, action in automod.items()
                 ]
             ),
