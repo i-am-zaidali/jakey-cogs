@@ -13,7 +13,7 @@ from .utils import timedelta_converter, EmojiConverter, group_embeds_by_fields
 from cachetools import TTLCache
 
 FLAGGED_MESSAGE = {}
-# { guild_id: { channel_id: { message_id: { author_id: int, content: int, timestamp: str, alert_message: int, cleared: bool} } } }
+# { guild_id: { channel_id: { message_id: { author_id: int, content: int, timestamp: str, alert_message: int, cleared: bool, reporters: list[int], flagged_by: int } } } }
 
 MEMBER_DEFAULTS = {"infractions": [], "watchlist": None}
 # infractions: list[Infraction]
@@ -206,39 +206,47 @@ class ModPlus(commands.Cog):
 
         await wl_channel.send(**kwargs)
 
-    def _create_flag_embed(self, flagger: discord.Member, reaction: discord.Reaction):
-        message = reaction.message
+    def _create_flag_embed(
+        self,
+        guild_id: int,
+        channel_id: int,
+        message_id: int,
+        flagger_id: int,
+        author_id: int,
+        message_content: str,
+        reporters: list[int],
+    ):
         embed = (
             discord.Embed(
                 title="**MESSAGE FLAGGED**",
-                description=f"Message flagged by {flagger.mention} ({flagger.id})",
+                description=f"Message flagged by <@{flagger_id}> ({flagger_id})",
                 color=discord.Color.yellow(),
             )
             .add_field(
                 name="Message Content",
-                value=f"||{message.content[:197] + ('...' if len(message.content) > 197 else '')}||",
+                value=f"||{message_content[:197] + ('...' if len(message_content) > 197 else '')}||",
                 inline=False,
             )
             .add_field(
                 name="Message Author",
-                value=f"{message.author.mention} ({message.author.id})",
+                value=f"<@{author_id}> ({author_id})",
                 inline=False,
             )
             .add_field(
                 name="Message Channel",
-                value=f"{message.channel.mention} ({message.channel.id})",
+                value=f"<#{channel_id}> ({channel_id})",
                 inline=False,
             )
             .add_field(
                 name="Message Link",
-                value=f"{message.jump_url}",
+                value=f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}",
                 inline=False,
             )
             .add_field(
                 name="Flagged By",
-                value=f"{reaction.count} users",
+                value=f"{len(reporters)} users",
             )
-            .set_footer(text=f"{message.channel.id}-{message.id}")
+            .set_footer(text=f"{channel_id}-{message_id}")
         )
 
         return embed
@@ -606,6 +614,30 @@ class ModPlus(commands.Cog):
         if not fc:
             return
 
+        message_details = await self.config.custom(
+            "FLAGGED", payload.guild_id, payload.channel_id, payload.message_id
+        ).all()
+
+        if message_details:
+            reporters: list[int] = [*message_details["reporters"], payload.user_id]
+            await self.config.custom(
+                "FLAGGED", payload.guild_id, payload.channel_id, payload.message_id
+            ).set_raw("reporters", value=reporters)
+
+            threshold = await self.config.guild(guild).flagging.ping_threshold()
+            if len(reporters) >= threshold:
+                ping_role = await self.config.guild(guild).flagging.mod_role()
+                alert_message = discord.PartialMessage(
+                    channel=fc, id=message_details["alert_message"]
+                )
+                await fc.send(
+                    f"<@&{ping_role}> need your attention on this",
+                    reference=alert_message,
+                    allowed_mentions=discord.AllowedMentions(roles=True),
+                )
+
+            return
+
         try:
             message = await self.bot.get_channel(payload.channel_id).fetch_message(
                 payload.message_id
@@ -614,27 +646,28 @@ class ModPlus(commands.Cog):
         except discord.NotFound:
             return
 
-        reaction = next(
-            filter(lambda x: str(x.emoji) == str(payload.emoji), message.reactions), None
-        )
-        if not reaction:
-            return
-
-        message_details = await self.config.custom(
-            "FLAGGED", payload.guild_id, payload.channel_id, payload.message_id
-        ).all()
         if not message_details:
             if not (cache := self.cooldown_cache.get(payload.guild_id)):
                 self.cooldown_cache[payload.message_id] = cache = TTLCache(
                     5, await self.config.guild(guild).flagging.cooldown()
                 )
-                cache.update({payload.user_id: message.id})
+                cache.update({payload.user_id: payload.message_id})
 
             else:
                 if cache.get(payload.user_id):
                     return
 
-            embed = self._create_flag_embed(payload.member, reaction)
+            reporters = [payload.user_id]
+
+            embed = self._create_flag_embed(
+                payload.guild_id,
+                payload.channel_id,
+                payload.message_id,
+                payload.member.id,
+                message.author.id,
+                message.content,
+                reporters,
+            )
 
             view = self.flagging_view
 
@@ -646,21 +679,15 @@ class ModPlus(commands.Cog):
                 "timestamp": message.created_at.isoformat(),
                 "alert_message": msg.id,
                 "cleared": False,
+                "reporters": reporters,
+                "flagged_by": payload.member.id,
             }
 
             await self.config.custom(
                 "FLAGGED", payload.guild_id, payload.channel_id, payload.message_id
             ).set(message_details)
 
-        threshold = await self.config.guild(guild).flagging.ping_threshold()
-        if reaction.count >= threshold:
-            ping_role = await self.config.guild(guild).flagging.mod_role()
-            alert_message = discord.PartialMessage(channel=fc, id=message_details["alert_message"])
-            await fc.send(
-                f"<@&{ping_role}> need your attention on this",
-                reference=alert_message,
-                allowed_mentions=discord.AllowedMentions(roles=True),
-            )
+            await message.clear_reaction(payload.emoji)
 
     # <--- Commands --->
 
