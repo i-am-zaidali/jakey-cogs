@@ -942,7 +942,7 @@ class ModPlus(commands.Cog):
 
             if action in ("tempban", "mute"):
                 await ctx.send(
-                    f"How long do you want to {action} the user for? (days, weeks, hours)"
+                    f"How long do you want to {action} the user for? (days, weeks, hours, minutes)"
                 )
                 msg = await ctx.bot.wait_for(
                     "message",

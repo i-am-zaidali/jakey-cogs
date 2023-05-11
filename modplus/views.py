@@ -355,7 +355,7 @@ class ActionSelectView(ViewDisableOnTimeout):
         kwargs = {"ctx": ctx, "user": self.violator, "reason": "Flagged Message"}
         if select.values[0] in ["mute", "ban"]:
             await inter.response.send_message(
-                "Please send the duration of the punishment. (hours, days, weeks)"
+                "Please send the duration of the punishment. (minutes, hours, days, weeks)"
             )
             try:
                 msg = await inter.client.wait_for(
