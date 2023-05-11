@@ -62,7 +62,7 @@ class ServerMember:
 
         self.infractions = list(
             map(
-                lambda infraction: (infraction, setattr(infraction.violator, self))[0],
+                lambda infraction: (infraction, setattr(infraction, "violator", self))[0],
                 await cog._get_infractions(guild_id, user_id),
             )
         )
