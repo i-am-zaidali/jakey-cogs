@@ -5,7 +5,9 @@ from typing import Union
 
 __all__ = ("timedelta_converter", "EmojiConverter", "group_embeds_by_fields")
 
-timedelta_converter = commands.get_timedelta_converter(allowed_units=["weeks", "days", "hours"])
+timedelta_converter = commands.get_timedelta_converter(
+    allowed_units=["minutes", "weeks", "days", "hours"]
+)
 
 
 class EmojiConverter(commands.EmojiConverter):
