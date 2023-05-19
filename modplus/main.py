@@ -1449,7 +1449,7 @@ class ModPlus(commands.Cog):
             title=f"Watchlist for {ctx.guild.name}",
             description=f"Total: {len(guild_watchlist)}",
             color=discord.Color.red().value,
-            thumbnail=getattr(ctx.guild.icon, "url", None),
+            thumbnail__url=getattr(ctx.guild.icon, "url", None),
         )
 
         await PaginationView(ctx, embeds).start()
