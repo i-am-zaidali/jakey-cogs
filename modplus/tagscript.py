@@ -23,6 +23,8 @@ blocks = [
     tse.BreakBlock(),
     tse.MathBlock(),
     tse.StopBlock(),
+    tse.AnyBlock(),
+    tse.AllBlock(),
 ]
 tagscript_engine = tse.Interpreter(blocks)
 
