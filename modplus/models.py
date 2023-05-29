@@ -74,11 +74,11 @@ class ServerMember:
         reason: str,
         duration: Optional[timedelta] = None,
     ):
-        action: Literal["warn", "mute", "kick", "ban"] = ctx.command.qualified_name
+        action: Literal["warn", "mute", "kick", "ban", "unban"] = ctx.command.qualified_name
         reason = reason or "No reason provided."
         issuer_id = ctx.author.id
 
-        if action == "ban" and duration:
+        if action == "ban" and duration is not None:
             action = "tempban"
 
         infraction = Infraction(
@@ -102,7 +102,7 @@ class ServerMember:
         self.infractions.remove(infraction)
 
     async def clear_infractions(self, cog: "InfractionsCog"):
-        await cog._clear_infractions(self)
+        await cog._clear_infractions(self, self.user_id)
         self.infractions.clear()
 
 

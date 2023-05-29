@@ -101,6 +101,11 @@ class ModPlus(commands.Cog):
         self.flagging_view = FlaggingView(self.bot)
         self._update_view()
 
+        self.unban_task = self.remove_tempbans.start()
+
+    def cog_unload(self):
+        self.unban_task.cancel()
+
     def _update_view(self):
         for view in filter(
             lambda x: x.__class__.__name__ == "FlaggingView", self.bot.persistent_views
@@ -126,26 +131,13 @@ class ModPlus(commands.Cog):
     ) -> dict[int, dict[str, Union[str, datetime, None]]]:
         guild = self.bot.get_guild(guild_id)
         return dict(
-            map(
-                lambda x: (
-                    x[0],
-                    dict(
-                        (
-                            ("reason", x[1]["watchlist"]["reason"]),
-                            (
-                                "duration",
-                                datetime.fromisoformat(x[1]["watchlist"]["duration"])
-                                if x[1]["watchlist"]["duration"] is not None
-                                else None,
-                            ),
-                        )
-                    ),
-                ),
-                filter(
+            [
+                (member_id, await self._get_watchlist_status(guild_id, member_id))
+                for member_id, _ in filter(
                     lambda x: x[1]["watchlist"] is not None,
                     (await self.config.all_members(guild)).items(),
-                ),
-            )
+                )
+            ]
         )
 
     async def _get_watchlist_status(self, guild_id: int, user_id: int):
@@ -174,7 +166,7 @@ class ModPlus(commands.Cog):
         await self.config.member_from_ids(guild_id, user_id).watchlist.clear()
 
     async def _clear_watchlist(self, guild_id: int):
-        for member in await self.config.all_members(guild_id):
+        for member in (await self.config.all_members()).get(guild_id, {}):
             await self.config.member_from_ids(guild_id, member).watchlist.clear()
 
     async def _notify_watchlist_of_infraction(self, ctx: commands.Context, infraction: Infraction):
@@ -390,8 +382,14 @@ class ModPlus(commands.Cog):
             log_message,
             {
                 "server": tse.GuildAdapter(guild),
-                "violator": tse.MemberAdapter(guild.get_member(infraction.violator.user_id)),
-                "issuer": tse.MemberAdapter(guild.get_member(infraction.issuer_id)),
+                "violator": tse.MemberAdapter(
+                    guild.get_member(infraction.violator.user_id)
+                    or self.bot.get_user(infraction.violator.user_id)
+                ),
+                "issuer": tse.MemberAdapter(
+                    guild.get_member(infraction.issuer_id)
+                    or self.bot.get_user(infraction.issuer_id)
+                ),
                 "reason": tse.StringAdapter(infraction.reason),
                 "id": tse.StringAdapter(str(infraction.id)),
                 "type": tse.StringAdapter(infraction.type.value),
@@ -416,8 +414,14 @@ class ModPlus(commands.Cog):
             message,
             {
                 "server": tse.GuildAdapter(guild),
-                "violator": tse.MemberAdapter(guild.get_member(infraction.violator.user_id)),
-                "issuer": tse.MemberAdapter(guild.get_member(infraction.issuer_id)),
+                "violator": tse.MemberAdapter(
+                    guild.get_member(infraction.violator.user_id)
+                    or self.bot.get_user(infraction.violator.user_id)
+                ),
+                "issuer": tse.MemberAdapter(
+                    guild.get_member(infraction.issuer_id)
+                    or self.bot.get_user(infraction.issuer_id)
+                ),
                 "reason": tse.StringAdapter(infraction.reason),
                 "id": tse.StringAdapter(str(infraction.id)),
                 "type": tse.StringAdapter(infraction.type.value),
@@ -537,23 +541,33 @@ class ModPlus(commands.Cog):
             if not guild:
                 continue
 
-            for member_id, member_data in guild_data["members"].items():
-                for infraction in filter(
-                    lambda x: x["type"] == "tempban", member_data["infractions"]
-                ):
-                    if datetime.fromisoformat(infraction["duration"]) < datetime.utcnow():
-                        # check if user isnt already unbanned
-                        if not next(
-                            filter(
-                                lambda x: x.user.id == int(member_id),
-                                [x async for x in guild.bans()],
-                            ),
-                            None,
-                        ):
-                            continue
-                        await guild.unban(
-                            discord.Object(id=int(member_id)), reason="Tempban expired"
-                        )
+            members_to_unban = filter(
+                lambda x: (
+                    lambda mid, data: next(
+                        filter(
+                            lambda infraction: infraction["type"] == "tempban"
+                            and infraction["duration"] is not None
+                            and (
+                                datetime.fromisoformat(infraction["at"])
+                                + timedelta(seconds=infraction["duration"])
+                            )
+                            < datetime.now(tz=timezone.utc)
+                            and guild.get_member(mid) is None,
+                            data["infractions"],
+                        ),
+                        None,
+                    )
+                    is not None
+                )(*x),
+                guild_data.items(),
+            )
+
+            for member_id, _ in members_to_unban:
+                try:
+                    await guild.unban(discord.Object(id=int(member_id)), reason="Tempban expired")
+
+                except discord.NotFound:
+                    pass
 
     @remove_tempbans.before_loop
     async def before_remove_tempbans(self):
@@ -596,7 +610,7 @@ class ModPlus(commands.Cog):
                 msg = f"User {user.mention} ({user.id}) is on the watchlist {duration}"
 
             else:
-                msg = f"User {user.mention} ({user.id}) is not on the watchlist"
+                return
 
             await message.channel.send(msg)
 
@@ -1223,7 +1237,7 @@ class ModPlus(commands.Cog):
         self,
         ctx: commands.Context,
         user: discord.Member,
-        until: Optional[timedelta_converter] = None,
+        until: Optional[timedelta_converter] = timedelta(minutes=30),
         *,
         reason: str,
     ):
@@ -1270,7 +1284,7 @@ class ModPlus(commands.Cog):
         self,
         ctx: commands.Context,
         user: discord.Member,
-        until: timedelta_converter = None,
+        until: Optional[timedelta_converter] = None,
         send_invite: Optional[bool] = True,
         *,
         reason: str,
@@ -1286,6 +1300,26 @@ class ModPlus(commands.Cog):
         sm = await ServerMember.from_member(self, user)
         infraction = await sm.infraction(ctx, reason, duration=until)
         await user.ban(reason=reason)
+
+    @commands.command(name="unban")
+    @commands.has_permissions(ban_members=True)
+    async def unban(self, ctx: commands.Context, user: discord.User, *, reason: str):
+        """
+        Unban a user.
+        """
+        # if not await self._validate_action(ctx, user, "unban"):
+        #     return await ctx.send("You cannot unban this user.")
+
+        try:
+            await ctx.guild.fetch_ban(user)
+        except discord.NotFound:
+            return await ctx.send("This user is not banned.")
+
+        reason = await self._appropriate_reason(ctx.guild.id, reason)
+
+        await ctx.guild.unban(user, reason=reason)
+
+        await ctx.send(f"Unbanned {user}.")
 
     @commands.command(name="kick")
     @commands.has_permissions(ban_members=True)
