@@ -92,8 +92,7 @@ class ServerMember:
 
         self.infractions.append(infraction)
 
-        ctx.bot.dispatch("modplus_infraction", ctx, self, infraction)
-        # async def on_modplus_infraction(self, ctx: commands.Context, member: ServerMember, infraction: Infractions):
+        await ctx.cog.on_modplus_infraction(ctx, self, infraction)
 
         return infraction
 

@@ -575,7 +575,7 @@ class ModPlus(commands.Cog):
 
     # <--- listeners --->
 
-    @commands.Cog.listener()
+    # @commands.Cog.listener()
     async def on_modplus_infraction(
         self, ctx: commands.Context, sm: ServerMember, infraction: Infraction
     ):
