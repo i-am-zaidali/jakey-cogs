@@ -491,7 +491,7 @@ class FlaggingView(View):
             )
 
         await inter.followup.send(
-            "Select the action you want to take.", ephemeral=True, view=ActionSelectView(mem, 60)
+            "Select the action you want to take.", ephemeral=True, view=ActionSelectView(self.bot, mem, 60)
         )
 
     @button(label="Clear Flag", style=discord.ButtonStyle.green, emoji="🚩", custom_id="clear_flag")
