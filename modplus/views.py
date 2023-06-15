@@ -332,7 +332,8 @@ class InfractionPagination(PaginationView):
 
 
 class ActionSelectView(ViewDisableOnTimeout):
-    def __init__(self, violator: discord.Member, timeout: int = 30):
+    def __init__(self, bot: Red, violator: discord.Member, timeout: int = 30):
+        self.bot = bot
         self.violator = violator
         super().__init__(timeout=timeout)
 
