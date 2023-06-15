@@ -356,8 +356,8 @@ class ActionSelectView(ViewDisableOnTimeout):
         inter: discord.Interaction,
         select: discord.ui.Select,
     ):
-        ctx = commands.Context.from_interaction(inter)
-        kwargs = {"ctx": ctx, "user": self.violator, "reason": "Flagged Message"}
+        ctx = await commands.Context.from_interaction(inter)
+        kwargs = {"user": self.violator, "reason": "Flagged Message"}
         await inter.response.defer(ephemeral=True)
         if select.values[0] in ["mute", "ban"]:
             await inter.channel.send(
@@ -383,7 +383,7 @@ class ActionSelectView(ViewDisableOnTimeout):
 
             kwargs["until"] = duration
 
-        await getattr(self.cog, select.values[0])(**kwargs)
+        await getattr(self.cog, select.values[0])(ctx, **kwargs)
 
         await inter.response.send_message("Action completed.")
 
