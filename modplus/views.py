@@ -356,7 +356,7 @@ class ActionSelectView(ViewDisableOnTimeout):
         inter: discord.Interaction,
         select: discord.ui.Select,
     ):
-        ctx = await commands.Context.from_interaction(inter)
+        ctx = self.bot.get_context(inter.message)
         kwargs = {"user": self.violator, "reason": "Flagged Message"}
         await inter.response.defer(ephemeral=True)
         if select.values[0] in ["mute", "ban"]:
