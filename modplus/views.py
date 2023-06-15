@@ -383,7 +383,10 @@ class ActionSelectView(ViewDisableOnTimeout):
 
             kwargs["until"] = duration
 
-        await getattr(self.cog, select.values[0])(ctx, **kwargs)
+        command = getattr(self.cog, select.values[0]) 
+        ctx.command = command
+        ctx.cog = command.cog
+        await command.(ctx, **kwargs)
 
         await inter.response.send_message("Action completed.")
 
