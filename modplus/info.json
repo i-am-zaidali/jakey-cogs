@@ -10,7 +10,8 @@
     "required_cogs": {},
     "requirements": [
         "git+https://github.com/phenom4n4n/TagScript.git@dpy2",
-        "cachetools"
+        "cachetools",
+        "emoji"
     ],
     "tags": [],
     "type": "COG"
