@@ -485,7 +485,7 @@ class ModPlus(commands.Cog):
         shorthands = await self.config.guild_from_id(guild_id).reason_sh()
         for shorthand, replacement in shorthands.items():
             reason = reason.replace(shorthand, replacement)
-
+            
         return reason
 
     async def _check_automod(self, ctx: commands.Context, user: discord.Member):
@@ -1303,7 +1303,7 @@ class ModPlus(commands.Cog):
 
     @commands.command(name="unban")
     @commands.has_permissions(ban_members=True)
-    async def unban(self, ctx: commands.Context, user: discord.User, *, reason: str):
+    async def unban(self, ctx: commands.Context, user: discord.User, *, reason: str = "No reason provided"):
         """
         Unban a user.
         """
