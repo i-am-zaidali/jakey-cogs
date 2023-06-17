@@ -413,8 +413,7 @@ class FlaggingView(View):
             "FLAGGED", interaction.guild_id, channel_id, message_id
         ).all()
 
-        await interaction.message.edit(
-            embed=self.cog._create_flag_embed(
+        embed = self.cog._create_flag_embed(
                 interaction.guild.id,
                 channel_id,
                 message_id,
@@ -422,7 +421,13 @@ class FlaggingView(View):
                 data["author_id"],
                 data["content"],
                 data["reporters"],
-            ),
+        )
+
+        if interaction.data["custom_id"] == "clear_flag":
+            embed.color = discord.Color.green()
+
+        await interaction.message.edit(
+            embed=embed,
             view=self,
         )
 
