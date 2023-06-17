@@ -1213,7 +1213,7 @@ class ModPlus(commands.Cog):
         {duration} - The duration of the moderation action.
         """
         if cm == "clear":
-            await self.config.guild(ctx.guild).channel_message.clear()
+            await self.config.guild(ctx.guild).channel_message.set("")
             return await ctx.send("Cleared the channel message.")
 
         elif cm == "default":
