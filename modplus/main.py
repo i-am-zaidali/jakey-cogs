@@ -639,7 +639,7 @@ class ModPlus(commands.Cog):
             ).set_raw("reporters", value=reporters)
 
             threshold = await self.config.guild(guild).flagging.ping_threshold()
-            if len(reporters) >= threshold:
+            if len(reporters) == threshold:
                 ping_role = await self.config.guild(guild).flagging.mod_role()
                 alert_message = discord.PartialMessage(
                     channel=fc, id=message_details["alert_message"]
