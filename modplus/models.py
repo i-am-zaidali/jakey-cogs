@@ -2,12 +2,53 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, TYPE_CHECKING, Literal
 from dataclasses import dataclass
 from enum import Enum
+import logging
 import discord
 import hashlib
 from redbot.core import commands
 
 if TYPE_CHECKING:
     from .main import ModPlus as InfractionsCog
+
+log = logging.getLogger("red.jakey.modplus.models")
+
+
+class InfractionConverter(commands.Converter):
+    async def convert(self, ctx: commands.Context, arg: str):
+        user: discord.Member = ctx.args[-1]
+        print("ifc", user, arg)
+        sm = await ServerMember.from_member(ctx.cog, user)
+        inf = await sm.get_infraction(ctx.cog, arg)
+        if inf is None:
+            raise commands.BadArgument(f"Infraction `{arg}` not found.")
+        return inf
+
+
+class InfractionDetails(commands.FlagConverter):
+    reason: str = "noob"
+    duration: Optional[commands.get_timedelta_converter()]
+    action: Literal["warn", "mute", "kick", "ban", "unban"]
+
+    async def convert(self, ctx: commands.Context, arg: str):
+        self = await super().convert(ctx, arg)
+        user: discord.Member = ctx.args[-1]
+        sm = await ServerMember.from_member(ctx.cog, user)
+        issuer_id = ctx.author.id
+        action = self.action
+
+        if action == "ban" and self.duration is not None:
+            action = "tempban"
+
+        infraction = Infraction(
+            type=InfractionType.__members__[action.upper()],
+            reason=self.reason,
+            at=datetime.now(timezone.utc),
+            duration=self.duration,
+            violator=sm,
+            issuer_id=issuer_id,
+        )
+
+        return infraction
 
 
 class InfractionType(Enum):

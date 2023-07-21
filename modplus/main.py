@@ -2,7 +2,7 @@ import discord
 from redbot.core import commands, Config
 from redbot.core.bot import Red
 from typing import Literal, Optional, Union
-from .models import ServerMember, Infraction
+from .models import ServerMember, Infraction, InfractionConverter, InfractionDetails
 from datetime import datetime, timedelta, timezone
 from .views import YesOrNoView, InfractionView, InfractionPagination, PaginationView, FlaggingView
 from .tagscript import process_tagscript
@@ -485,7 +485,7 @@ class ModPlus(commands.Cog):
         shorthands = await self.config.guild_from_id(guild_id).reason_sh()
         for shorthand, replacement in shorthands.items():
             reason = reason.replace(shorthand, replacement)
-            
+
         return reason
 
     async def _check_automod(self, ctx: commands.Context, user: discord.Member):
@@ -1229,6 +1229,49 @@ class ModPlus(commands.Cog):
         await self.config.guild(ctx.guild).channel_message.set(cm)
         return await ctx.send(f"Set the channel message to ```{cm}```")
 
+    @mpset.command(name="tagscripttest", aliases=["tst", "tstest"])
+    async def mpset_tst(
+        self,
+        ctx: commands.Context,
+        ts: Literal["log", "dm", "channel"],
+        user: discord.Member,
+        *,
+        infraction: Infraction = commands.parameter(
+            converter=Union[InfractionDetails, InfractionConverter]
+        ),
+    ):
+        """
+        Test your written tagscript for the log, dm or channel message.
+
+        `ts` can be one of `log`, `dm` or `channel`.
+        `user` is the user to use for the tagscript as the violator.
+        `infraction` can be one of two things:
+        - An infraction ID
+        - Flags that detail the infraction. Possible flags are:
+            - `reason` - The reason for the infraction
+            - `duration` - The duration of the infraction
+            - `action` - The action of the infraction (ban, kick, mute, warn, tempban)
+
+            The syntax for the flags is `flagname: value`.
+            For example, `reason: test` OR `duration: 1d` OR `action: ban`
+            OR combined: `reason: test duration: 1d action: ban`
+        """
+        seeds = {
+            "server": tse.GuildAdapter(ctx.guild),
+            "violator": tse.MemberAdapter(ctx.guild.get_member(infraction.violator.user_id)),
+            "issuer": tse.MemberAdapter(ctx.guild.get_member(infraction.issuer_id)),
+            "reason": tse.StringAdapter(infraction.reason),
+            "id": tse.StringAdapter(str(infraction.id)),
+            "type": tse.StringAdapter(infraction.type.value),
+            "duration": tse.IntAdapter(infraction.duration.total_seconds())
+            if infraction.duration
+            else tse.StringAdapter("Permanent"),
+        }
+
+        message = await self.config.guild(ctx.guild).get_attr(f"{ts}_message")()
+        processed = process_tagscript(message, seeds)
+        return await ctx.send(**processed)
+
     # <--- Moderation Commands --->
 
     @commands.command(name="warn")
@@ -1303,7 +1346,9 @@ class ModPlus(commands.Cog):
 
     @commands.command(name="unban")
     @commands.has_permissions(ban_members=True)
-    async def unban(self, ctx: commands.Context, user: discord.User, *, reason: str = "No reason provided"):
+    async def unban(
+        self, ctx: commands.Context, user: discord.User, *, reason: str = "No reason provided"
+    ):
         """
         Unban a user.
         """
